@@ -22,6 +22,7 @@ enum Tab {
     Display,
     Window,
     Area,
+    Event,
 }
 
 struct Recent {
@@ -66,6 +67,8 @@ pub struct Studio {
     tray: Option<crate::tray::StatusItem>,
     options: RecordOptions,
     tab: Tab,
+    cameras: Vec<crate::camera::DeviceInfo>,
+    microphones: Vec<crate::camera::DeviceInfo>,
     display: Option<u32>,
     window: Option<u32>,
     area: Option<Source>,
@@ -91,6 +94,8 @@ impl Studio {
             tray: None,
             options: RecordOptions::default(),
             tab: Tab::Display,
+            cameras: crate::camera::list_devices(false),
+            microphones: crate::camera::list_devices(true),
             display: None,
             window: None,
             area: None,
@@ -170,6 +175,9 @@ impl Studio {
     }
 
     fn source(&self) -> Option<Source> {
+        if self.tab == Tab::Event {
+            return Some(Source::Event);
+        }
         if !self.screen_access || !matches!(self.sources, Some(Ok(_))) {
             return None;
         }
@@ -183,6 +191,7 @@ impl Studio {
             Tab::Display => Some(Source::Display(main().unwrap_or_else(|| RecordOptions::default_display()))),
             Tab::Window => self.window.map(Source::Window),
             Tab::Area => self.area,
+            Tab::Event => Some(Source::Event),
         }
     }
 
@@ -281,7 +290,8 @@ impl Studio {
         if !matches!(self.screen, Screen::Home) || self.source().is_none() {
             return;
         }
-        let options = self.options;
+        let mut options = self.options.clone();
+        options.source = self.source().unwrap();
         self.screen = Screen::Busy("Checking recording permissions… Respond to any macOS dialog to continue.".into());
         self.error = None;
         self.permission_error = false;
@@ -315,7 +325,7 @@ impl Studio {
             }
         };
         self.options.source = source;
-        let handle = Rc::new(RecordingHandle::start(dir, self.options));
+        let handle = Rc::new(RecordingHandle::start(dir, self.options.clone()));
         let bar_handle = handle.clone();
         self.recorder = Some(handle.clone());
         self.screen = Screen::Recording;

@@ -210,3 +210,12 @@ mod tests {
         assert_eq!(serde_json::from_str::<Style>(&saved).unwrap(), updated);
     }
 }
+
+impl Style {
+    /// Camera-only takes fill the canvas, with no screen-specific decoration.
+    pub fn event() -> Self {
+        Self { padding: 0.0, radius: 0.0, shadow: 0.0, auto_zoom: false,
+            cursor_visible: false, click_ripple: false, camera_visible: false,
+            keys_visible: false, ..Self::default() }
+    }
+}

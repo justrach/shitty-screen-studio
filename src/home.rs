@@ -11,8 +11,8 @@ impl Studio {
                         .child(icon(icons::MONITOR).size(px(16.)).text_color(rgb(MUTED)))
                         .child(section_title("Capture")))
                     .child(div().flex().items_center().gap_2().px_3().py_1().rounded_full().bg(alpha(SUCCESS, 0.06))
-                        .child(div().size(px(5.)).rounded_full().bg(rgb(if self.screen_access { SUCCESS } else { ACCENT })))
-                        .child(small(if self.screen_access { "Ready to record" } else { "Screen access needed" }))))
+                        .child(div().size(px(5.)).rounded_full().bg(rgb(if self.screen_access || self.tab == Tab::Event { SUCCESS } else { ACCENT })))
+                        .child(small(if self.screen_access || self.tab == Tab::Event { "Ready to record" } else { "Screen access needed" }))))
                 .child(div().id("home").flex_1().min_h_0().overflow_y_scroll().p_6()
                     .child(div().w_full().max_w(px(920.)).mx_auto().flex().flex_col().gap_6()
                         .child(div().flex().flex_col().gap_3().pt_4().pb_2()
@@ -20,7 +20,7 @@ impl Studio {
                                 .child(div().size(px(6.)).rounded_full().bg(rgb(ACCENT)))
                                 .child(small("YOUR NEXT GREAT TAKE").text_color(rgb(ACCENT)).font_weight(FontWeight::SEMIBOLD)))
                             .child(div().text_size(px(34.)).font_weight(FontWeight::SEMIBOLD).child("A little capture. A lot of possibility."))
-                            .child(div().text_size(px(14.)).text_color(rgb(MUTED)).child("Record your screen, shape your story, and share something beautiful.")))
+                            .child(div().text_size(px(14.)).text_color(rgb(MUTED)).child("Capture your screen or record yourself at an event. Shape your story and share it.")))
                         .child(div().flex().gap_4()
                             .child(frosted(16., MENU_BLUR, self.render_new_recording(cx)))
                             .child(frosted(16., MENU_BLUR, self.render_editing_intro(cx)))))))
@@ -289,6 +289,17 @@ impl Studio {
                             .child("Choose a source and the inputs for this take."),
                     ),
             )
+            .child(segments()
+                .child(segment("mode-screen", "Screen", self.tab != Tab::Event).flex_1()
+                    .on_click(cx.listener(|this, _, _, cx| { this.tab = Tab::Display; cx.notify(); })))
+                .child(segment("mode-event", "Event · Self recorder", self.tab == Tab::Event).flex_1()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if this.tab != Tab::Event { this.options.mic = true; }
+                        this.tab = Tab::Event;
+                        this.cameras = crate::camera::list_devices(false);
+                        this.microphones = crate::camera::list_devices(true);
+                        cx.notify();
+                    }))))
             .child(self.render_source(cx))
             .child(self.render_inputs(cx))
             .when_some(self.error.clone(), |d, e| {
@@ -336,7 +347,7 @@ impl Studio {
                             .on_click(cx.listener(|this, _, window, cx| this.start_recording(window, cx))),
                     )
                     .child(
-                        small(format!("Records at up to 120 fps. The app hides itself from the capture. Press {} to stop, or use the floating bar or the menu bar.", crate::tray::STOP_SHORTCUT))
+                        small(if self.tab == Tab::Event { format!("Records your webcam full-frame at up to 30 fps with your selected microphone. Press {} to stop, or use the floating bar.", crate::tray::STOP_SHORTCUT) } else { format!("Records at up to 120 fps. The app hides itself from the capture. Press {} to stop, or use the floating bar or the menu bar.", crate::tray::STOP_SHORTCUT) })
                             .text_color(rgb(TERTIARY))
                             .px(px(2.)),
                     ),
@@ -345,6 +356,12 @@ impl Studio {
     }
 
     fn render_source(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        if self.tab == Tab::Event {
+            return group().child(div().p_4().flex().flex_col().gap_2()
+                .child(section_title("Your event, your perspective"))
+                .child(small("Record a talk, an interview, or a personal update with your webcam as the full video. Choose your inputs below; your take opens in the editor when you stop.")))
+                .into_any_element();
+        }
         if !self.screen_access {
             return div()
                 .flex()
@@ -559,11 +576,54 @@ impl Studio {
             .child(
                 group()
                     .child(item("mic", "Microphone", true, self.options.mic, |o| o.mic = !o.mic))
-                    .child(item("sys-audio", "System Audio", false, self.options.system_audio, |o| o.system_audio = !o.system_audio))
-                    .child(item("camera", "Camera", false, self.options.camera, |o| o.camera = !o.camera))
-                    .child(item("keys", "Keyboard Shortcuts", false, self.options.keys, |o| o.keys = !o.keys)),
+                    .when(self.tab != Tab::Event, |d| d.child(item("sys-audio", "System Audio", false, self.options.system_audio, |o| o.system_audio = !o.system_audio)))
+                    .when(self.tab != Tab::Event, |d| d.child(item("camera", "Camera", false, self.options.camera, |o| o.camera = !o.camera)))
+                    .when(self.tab != Tab::Event, |d| d.child(item("keys", "Keyboard Shortcuts", false, self.options.keys, |o| o.keys = !o.keys))),
             )
-            .child(small("Microphone, Camera, and Keyboard Shortcuts are optional. macOS asks for access when you start recording with them enabled. Keyboard Shortcuts uses Input Monitoring to display shortcuts; plain typing is not saved."))
+            .when(self.tab == Tab::Event || self.options.camera, |d| d.child(self.render_device_choices(false, cx)))
+            .when(self.options.mic, |d| d.child(self.render_device_choices(true, cx)))
+            .child(button("refresh-inputs", "Refresh cameras & microphones")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.cameras = crate::camera::list_devices(false);
+                    this.microphones = crate::camera::list_devices(true);
+                    cx.notify();
+                })))
+            .child(small(if self.tab == Tab::Event {
+                "macOS asks for camera and microphone access when you start. Refresh inputs after connecting a device. Turn off Microphone for a silent take."
+            } else {
+                "macOS asks for camera and microphone access when you start. Keyboard Shortcuts uses Input Monitoring; plain typing is not saved."
+            }))
             .into_any_element()
     }
+
+    fn render_device_choices(&self, mic: bool, cx: &mut Context<Self>) -> AnyElement {
+        let devices = if mic { &self.microphones } else { &self.cameras };
+        let selected = if mic { &self.options.mic_device } else { &self.options.camera_device };
+        let title = if mic { "Microphone device" } else { "Webcam" };
+        let prefix = if mic { "microphone-device" } else { "camera-device" };
+        div().flex().flex_col().gap_2().child(group_title(title))
+            .child(group()
+                .child(group_row(true).id((prefix, 0usize)).cursor_default()
+                    .child("System default").child(check(selected.is_none()))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if mic { this.options.mic_device = None; } else { this.options.camera_device = None; }
+                        cx.notify();
+                    })))
+                .children(devices.iter().enumerate().map(|(i, device)| {
+                    let id = device.id.clone();
+                    group_row(false).id((prefix, i + 1)).cursor_default()
+                        .child(div().flex_1().min_w_0().child(device.name.clone()))
+                        .child(check(selected.as_deref() == Some(device.id.as_str())))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if mic { this.options.mic_device = Some(id.clone()); } else { this.options.camera_device = Some(id.clone()); }
+                            cx.notify();
+                        }))
+                }))
+                .when(devices.is_empty(), |d| d.child(group_row(false).child(small("No devices listed. Allow access when starting, then refresh inputs.")))))
+            .when(selected.as_ref().is_some_and(|id| !devices.iter().any(|d| &d.id == id)), |d| {
+                d.child(small("Selected device is disconnected. Choose a connected input or System default.").text_color(rgb(RED)))
+            })
+            .into_any_element()
+    }
+
 }

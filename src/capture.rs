@@ -44,17 +44,21 @@ const SAMPLE_RATE: i64 = 48_000;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Source {
     Display(u32),
+    /// Full-frame webcam recording without screen capture.
+    Event,
     Window(u32),
     /// Rect in points, relative to the display's top-left corner.
     Area { display: u32, x: f64, y: f64, w: f64, h: f64 },
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct RecordOptions {
     pub source: Source,
     pub system_audio: bool,
     pub mic: bool,
     pub camera: bool,
+    pub camera_device: Option<String>,
+    pub mic_device: Option<String>,
     /// Record keyboard shortcuts, never plain typing.
     pub keys: bool,
 }
@@ -67,7 +71,7 @@ impl RecordOptions {
 
 impl Default for RecordOptions {
     fn default() -> Self {
-        Self { source: Source::Display(CGMainDisplayID()), system_audio: false, mic: false, camera: false, keys: false }
+        Self { source: Source::Display(CGMainDisplayID()), system_audio: false, mic: false, camera: false, camera_device: None, mic_device: None, keys: false }
     }
 }
 
@@ -106,16 +110,18 @@ pub fn request_screen_access() -> bool {
 
 /// Resolve permission prompts while the main window is still visible.
 pub fn ensure_recording_access(options: RecordOptions) -> Result<()> {
-    if !screen_access() {
+    if options.source != Source::Event && !screen_access() {
         bail!("Screen Recording access is off. Enable Recorder in System Settings → Privacy & Security → Screen Recording, then return and check access again. macOS may ask you to quit and reopen the app.");
     }
     if options.mic {
         crate::camera::ensure_access(true)?;
+        crate::camera::resolve_device(options.mic_device.as_deref(), true)?;
     }
-    if options.camera {
+    if options.camera || options.source == Source::Event {
         crate::camera::ensure_access(false)?;
+        crate::camera::resolve_device(options.camera_device.as_deref(), false)?;
     }
-    if options.keys {
+    if options.keys && options.source != Source::Event {
         crate::keys::ensure_access()?;
     }
     Ok(())
@@ -539,7 +545,7 @@ fn target(content: &SCShareableContent, source: Source) -> Result<Target> {
         }
         let display_id = match source {
             Source::Display(id) | Source::Area { display: id, .. } => id,
-            Source::Window(_) => unreachable!(),
+            Source::Window(_) | Source::Event => unreachable!(),
         };
         let displays = content.displays();
         let display = displays
@@ -576,6 +582,9 @@ fn target(content: &SCShareableContent, source: Source) -> Result<Target> {
 }
 
 fn record(dir: &Path, options: RecordOptions, stop: &Arc<AtomicBool>, state: &Mutex<RecState>) -> Result<()> {
+    if options.source == Source::Event {
+        return record_event(dir, &options, stop, state);
+    }
     if options.mic {
         crate::camera::ensure_access(true)?;
     }
@@ -586,7 +595,7 @@ fn record(dir: &Path, options: RecordOptions, stop: &Arc<AtomicBool>, state: &Mu
     let target = target(&content, options.source)?;
     let points_width = target.region.size.width as f32;
 
-    let camera = if options.camera { Some(CameraHandle::start(&Project::camera_path(dir))?) } else { None };
+    let camera = if options.camera { Some(CameraHandle::start(&Project::camera_path(dir), options.camera_device.as_deref())?) } else { None };
 
     let writer: SharedWriter = Arc::new(Mutex::new(Writer::new(
         &Project::video_path(dir),
@@ -618,6 +627,9 @@ fn record(dir: &Path, options: RecordOptions, stop: &Arc<AtomicBool>, state: &Mu
         }
         if options.mic {
             config.setCaptureMicrophone(true);
+            if let Some(id) = &options.mic_device {
+                config.setMicrophoneCaptureDeviceID(Some(&NSString::from_str(id)));
+            }
         }
         let stream = SCStream::initWithFilter_configuration_delegate(SCStream::alloc(), &target.filter, &config, None);
         let queue = DispatchQueue::new("recorder.capture", None);
@@ -698,7 +710,7 @@ fn record(dir: &Path, options: RecordOptions, stop: &Arc<AtomicBool>, state: &Mu
     };
     let camera = match camera {
         Some(camera) => {
-            let cam_start = camera.finish()?;
+            let cam_start = camera.finish()?.start;
             Some(CameraTrack { lead: start - cam_start })
         }
         None => None,
@@ -748,6 +760,36 @@ fn record(dir: &Path, options: RecordOptions, stop: &Arc<AtomicBool>, state: &Mu
         },
     };
     project.save()?;
+    *state.lock().unwrap() = RecState::Done(dir.to_path_buf());
+    Ok(())
+}
+
+/// Event takes use the webcam as the main video, with its microphone in the same file.
+fn record_event(dir: &Path, options: &RecordOptions, stop: &Arc<AtomicBool>, state: &Mutex<RecState>) -> Result<()> {
+    let camera = CameraHandle::start_event(&Project::video_path(dir), options.camera_device.as_deref(), options.mic, options.mic_device.as_deref())?;
+    *state.lock().unwrap() = RecState::Recording { since: Instant::now() };
+    while !stop.load(Ordering::Relaxed) {
+        if let Some(error) = camera.error() {
+            eprintln!("event recording stopped: {error}");
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    *state.lock().unwrap() = RecState::Saving;
+    let take = camera.finish()?;
+    if options.mic {
+        if let Err(e) = crate::audio::mix(&Project::video_path(dir), &Project::audio_path(dir)) {
+            eprintln!("event audio: {e:#}");
+        }
+    }
+    Project {
+        dir: dir.to_path_buf(),
+        rec: Recording {
+            width: take.width, height: take.height, fps: 30, duration: take.duration,
+            points_width: take.width as f32, cursor: Vec::new(), zooms: None, style: Some(crate::style::Style::event()),
+            color: ColorSpace::Srgb, camera: None, timeline: None, keys: Vec::new(),
+        },
+    }.save()?;
     *state.lock().unwrap() = RecState::Done(dir.to_path_buf());
     Ok(())
 }

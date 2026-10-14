@@ -87,3 +87,11 @@ Cursor effects: the Motion & Cursor inspector controls shutter-based motion blur
 Model routing: Recorder explicitly selects the Codegraff gateway, using the same Codegraff login as Harness. Use `graff route gemini-3.8-flash mimo-v2.6-pro` to inspect routing without calling a model. A missing/expired Codegraff login must be fixed in graff or Harness; Recorder never silently falls back to ChatGPT or another model.
 
 Recorder’s Agents page adapts the Harness account-card layout and uses graff’s existing shared login stores. Sign in opens graff’s browser device flow; no separate Recorder credentials are created. Video and edit model routes are pinned to `codegraff/gemini-3.8-flash` and `codegraff/mimo-v2.6-pro`. Recorder prefers Harness’s managed `~/.harness/bin/graff` when installed.
+
+### Event self recorder
+
+Choose **Event · Self recorder** on the capture screen to record a full-frame webcam take for talks, interviews, and personal updates. Select a named **Webcam** and **Microphone device**, or use **System default**. Microphone starts enabled in Event mode and can be turned off for a silent take. Use **Refresh cameras & microphones** after connecting an external device; disconnected selections fail clearly instead of switching devices silently.
+
+Event mode requires camera access and microphone access when enabled; it does not require Screen Recording or Input Monitoring. Stop with the floating bar, menu bar, or the usual stop shortcut. The take opens in the editor and is saved in the same library, with a clean edge-to-edge canvas. Screen mode also supports the same device selectors for its webcam overlay and microphone.
+
+CLI: `recorder --devices` lists device IDs; `recorder --record 10 --event --mic --camera-device <id> --mic-device <id>` records an event take. Omit the device flags to use system defaults.

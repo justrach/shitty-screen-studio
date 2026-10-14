@@ -37,6 +37,14 @@ fn main() {
         }
         return;
     }
+    if args.get(1).map(String::as_str) == Some("--devices") {
+        for mic in [false, true] {
+            for d in camera::list_devices(mic) {
+                println!("{} {} — {}", if mic { "microphone" } else { "camera" }, d.id, d.name);
+            }
+        }
+        return;
+    }
     if args.get(1).map(String::as_str) == Some("--sources") {
         match capture::list_sources() {
             Ok(s) => {
@@ -146,6 +154,9 @@ mod cli {
                 "--mic" => options.mic = true,
                 "--system-audio" => options.system_audio = true,
                 "--camera" => options.camera = true,
+                "--event" => options.source = Source::Event,
+                "--camera-device" => options.camera_device = Some(it.next().context("camera device ID")?.clone()),
+                "--mic-device" => options.mic_device = Some(it.next().context("microphone device ID")?.clone()),
                 "--keys" => options.keys = true,
                 "--window" => options.source = Source::Window(it.next().context("window id")?.parse()?),
                 "--area" => {

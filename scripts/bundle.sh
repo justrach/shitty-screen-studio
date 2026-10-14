@@ -53,7 +53,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>NSHighResolutionCapable</key><true/>
   <key>NSScreenCaptureUsageDescription</key><string>Record your selected display, window, or area and save it in your recording library.</string>
   <key>NSMicrophoneUsageDescription</key><string>Add your voice when Microphone is enabled. Turn it off to record without microphone audio.</string>
-  <key>NSCameraUsageDescription</key><string>Add a camera overlay when Camera is enabled. Turn it off to record without a camera overlay.</string>
+  <key>NSCameraUsageDescription</key><string>Record yourself in Event mode or add a webcam overlay to a screen recording.</string>
   <key>NSHumanReadableCopyright</key><string>Based on Shitty Screen Studio by Li Yang (@hewliyang). Harness UI by Standard Harness, Rach Pradhan and Yu Xi Lim.</string>
 </dict></plist>
 PLIST
