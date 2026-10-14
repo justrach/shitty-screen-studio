@@ -84,7 +84,7 @@ pub fn layout(out_w: u32, out_h: u32, p: &Params, t: f64) -> Layout {
     Layout { screen, transform }
 }
 
-pub(crate) fn draw_cursor(out: &mut Pixmap, base: Transform) {
+pub(crate) fn draw_cursor(out: &mut Pixmap, base: Transform, style: crate::style::CursorStyle) {
     let path = cursor_path();
     let mut shadow = Paint::default();
     shadow.anti_alias = true;
@@ -93,13 +93,37 @@ pub(crate) fn draw_cursor(out: &mut Pixmap, base: Transform) {
 
     let mut white = Paint::default();
     white.anti_alias = true;
-    white.set_color(Color::WHITE);
+    white.set_color(if style == crate::style::CursorStyle::Black { Color::WHITE } else { Color::BLACK });
     let stroke = Stroke { width: 2.4, line_join: LineJoin::Round, line_cap: LineCap::Round, ..Default::default() };
     out.stroke_path(&path, &white, &stroke, base, None);
 
     let mut black = Paint::default();
     black.anti_alias = true;
-    black.set_color(Color::BLACK);
+    black.set_color(match style {
+        crate::style::CursorStyle::Black => Color::BLACK,
+        crate::style::CursorStyle::White => Color::WHITE,
+        crate::style::CursorStyle::Amber => Color::from_rgba8(232, 163, 61, 255),
+    });
     out.fill_path(&path, &black, FillRule::Winding, base, None);
 }
 
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::*;
+    use crate::style::CursorStyle;
+
+    #[test]
+    fn cursor_variants_use_distinct_fills_and_same_hotspot() {
+        let colors: Vec<_> = CursorStyle::ALL.into_iter().map(|style| {
+            let mut pixmap = Pixmap::new(64, 64).unwrap();
+            draw_cursor(&mut pixmap, Transform::from_translate(8., 8.), style);
+            // Interior of the arrow, safely away from its antialiased edge.
+            pixmap.pixel(10, 15).unwrap()
+        }).collect();
+        assert_eq!(colors[0].red(), 0);
+        assert_eq!(colors[1].red(), 255);
+        assert_eq!(colors[2].red(), 232);
+        assert!(colors.iter().all(|c| c.alpha() == 255));
+    }
+}

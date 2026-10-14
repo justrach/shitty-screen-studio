@@ -112,6 +112,25 @@ pub fn canvas_size(aspect: Aspect, src_w: u32, src_h: u32, short: u32) -> (u32, 
     if r >= 1.0 { (even(short as f32 * r), short) } else { (short, even(short as f32 / r)) }
 }
 
+/// Cursor artwork shared by preview and exported frames.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CursorStyle {
+    #[default]
+    Black,
+    White,
+    Amber,
+}
+impl CursorStyle {
+    pub const ALL: [Self; 3] = [Self::Black, Self::White, Self::Amber];
+    pub fn label(self) -> &'static str {
+        match self { Self::Black => "Black", Self::White => "White", Self::Amber => "Amber" }
+    }
+    pub fn index(self) -> usize {
+        match self { Self::Black => 0, Self::White => 1, Self::Amber => 2 }
+    }
+}
+
 /// Style lengths are in pixels of a canvas whose short side is 1080.
 pub fn unit(w: u32, h: u32) -> f32 {
     w.min(h) as f32 / 1080.0
@@ -127,6 +146,8 @@ pub struct Style {
     pub shadow: f32,
     pub zoom: f32,
     pub auto_zoom: bool,
+    pub cursor_style: CursorStyle,
+    pub cursor_visible: bool,
     pub cursor_size: f32,
     pub cursor_smoothing: f32,
     pub click_ripple: bool,
@@ -154,6 +175,8 @@ impl Default for Style {
             shadow: 0.6,
             zoom: 2.0,
             auto_zoom: true,
+            cursor_style: CursorStyle::Black,
+            cursor_visible: true,
             cursor_size: 1.6,
             cursor_smoothing: 0.6,
             click_ripple: true,
@@ -169,3 +192,21 @@ impl Default for Style {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_styles_keep_visible_black_cursor() {
+        let style: Style = serde_json::from_str(r#"{"cursor_size":2.0}"#).unwrap();
+        assert_eq!(style.cursor_style, CursorStyle::Black);
+        assert!(style.cursor_visible);
+        assert_eq!(style.cursor_size, 2.0);
+        let mut updated = style;
+        updated.cursor_style = CursorStyle::Amber;
+        updated.cursor_visible = false;
+        let saved = serde_json::to_string(&updated).unwrap();
+        assert_eq!(serde_json::from_str::<Style>(&saved).unwrap(), updated);
+    }
+}

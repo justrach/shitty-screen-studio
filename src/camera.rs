@@ -120,10 +120,12 @@ pub fn ensure_access(mic: bool) -> Result<()> {
             unsafe { AVCaptureDevice::requestAccessForMediaType_completionHandler(media, &handler) };
             match rx.recv_timeout(Duration::from_secs(120)) {
                 Ok(true) => Ok(()),
-                _ => bail!("{} access was not granted", name.to_lowercase()),
+                Ok(false) => bail!("{name} access was declined. Enable Recorder in System Settings → Privacy & Security → {name}, or turn off {name} in Inputs to record without it."),
+                Err(_) => bail!("Still waiting for {name} access. Respond to the macOS permission dialog, then try recording again."),
             }
         }
-        _ => bail!("{} access is off. Turn it on in System Settings → Privacy & Security → {name}.", name.to_lowercase()),
+        AVAuthorizationStatus::Restricted => bail!("{name} access is restricted by this Mac's settings. Turn off {name} in Inputs to record without it."),
+        _ => bail!("{name} access is off. Enable Recorder in System Settings → Privacy & Security → {name}, or turn off {name} in Inputs to record without it."),
     }
 }
 
@@ -157,7 +159,7 @@ impl CameraHandle {
             session.addInput(&input);
             let output = AVCaptureVideoDataOutput::new();
             output.setAlwaysDiscardsLateVideoFrames(true);
-            let queue = DispatchQueue::new("shitty-screen-studio.camera", None);
+            let queue = DispatchQueue::new("recorder.camera", None);
             output.setSampleBufferDelegate_queue(Some(ProtocolObject::from_ref(&*sink)), Some(&queue));
             if !session.canAddOutput(&output) {
                 bail!("cannot read camera frames");

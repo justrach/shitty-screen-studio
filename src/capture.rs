@@ -17,7 +17,8 @@ use objc2_av_foundation::{
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
     CGDisplayBounds, CGDisplayCopyDisplayMode, CGDisplayMode, CGEvent, CGEventSource, CGEventSourceStateID,
-    CGMainDisplayID, CGMouseButton, kCGColorSpaceDisplayP3, kCGDisplayStreamYCbCrMatrix_ITU_R_709_2,
+    CGMainDisplayID, CGMouseButton, CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess,
+    kCGColorSpaceDisplayP3, kCGDisplayStreamYCbCrMatrix_ITU_R_709_2,
 };
 use objc2_core_media::{CMClock, CMSampleBuffer, CMTime};
 use objc2_core_video::CVPixelBuffer;
@@ -92,6 +93,32 @@ pub struct WindowInfo {
 pub struct Sources {
     pub displays: Vec<DisplayInfo>,
     pub windows: Vec<WindowInfo>,
+}
+
+pub fn screen_access() -> bool {
+    CGPreflightScreenCaptureAccess()
+}
+
+/// Only call in response to an explicit user action, never during startup.
+pub fn request_screen_access() -> bool {
+    CGRequestScreenCaptureAccess()
+}
+
+/// Resolve permission prompts while the main window is still visible.
+pub fn ensure_recording_access(options: RecordOptions) -> Result<()> {
+    if !screen_access() {
+        bail!("Screen Recording access is off. Enable Recorder in System Settings → Privacy & Security → Screen Recording, then return and check access again. macOS may ask you to quit and reopen the app.");
+    }
+    if options.mic {
+        crate::camera::ensure_access(true)?;
+    }
+    if options.camera {
+        crate::camera::ensure_access(false)?;
+    }
+    if options.keys {
+        crate::keys::ensure_access()?;
+    }
+    Ok(())
 }
 
 pub fn list_sources() -> Result<Sources> {
@@ -450,7 +477,7 @@ fn shareable_content() -> Result<Retained<SCShareableContent>> {
         .map_err(|_| anyhow!("timed out waiting for ScreenCaptureKit"))?;
     result
         .map(|b| b.0)
-        .map_err(|e| anyhow!("{e}. Grant Screen Recording permission to this app (or your terminal) in System Settings → Privacy & Security."))
+        .map_err(|e| anyhow!("Could not load screens and windows: {e}. Check Recorder in System Settings → Privacy & Security → Screen Recording, then check access again. If access is already enabled, quit and reopen the app."))
 }
 
 fn wait_completion(start: impl FnOnce(&block2::DynBlock<dyn Fn(*mut NSError)>)) -> Result<()> {
@@ -593,7 +620,7 @@ fn record(dir: &Path, options: RecordOptions, stop: &Arc<AtomicBool>, state: &Mu
             config.setCaptureMicrophone(true);
         }
         let stream = SCStream::initWithFilter_configuration_delegate(SCStream::alloc(), &target.filter, &config, None);
-        let queue = DispatchQueue::new("shitty-screen-studio.capture", None);
+        let queue = DispatchQueue::new("recorder.capture", None);
         let mut kinds = vec![SCStreamOutputType::Screen];
         if options.system_audio {
             kinds.push(SCStreamOutputType::Audio);
@@ -724,4 +751,3 @@ fn record(dir: &Path, options: RecordOptions, stop: &Arc<AtomicBool>, state: &Mu
     *state.lock().unwrap() = RecState::Done(dir.to_path_buf());
     Ok(())
 }
-

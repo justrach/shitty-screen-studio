@@ -1,24 +1,31 @@
 use gpui::{
-    BoxShadow, Div, ElementId, FontFeatures, FontWeight, Hsla, SharedString, Stateful, div, point, prelude::*, px,
-    rgb,
+    BoxShadow, Div, ElementId, FontFeatures, FontWeight, Hsla, SharedString, Stateful, div, point,
+    prelude::*, px, rgb,
 };
 use std::sync::Arc;
 
-// macOS dark appearance system colors.
-pub const BG: u32 = 0x1e1e1e;
-pub const STAGE: u32 = 0x161616;
-pub const CHROME: u32 = 0x282828;
-pub const GROUP: u32 = 0x2c2c2e;
-pub const CONTROL: u32 = 0x4a4a4c;
-pub const CONTROL_HOVER: u32 = 0x565658;
-pub const TEXT: u32 = 0xe5e5e7;
-pub const MUTED: u32 = 0x98989d;
-pub const TERTIARY: u32 = 0x636366;
-pub const ACCENT: u32 = 0x0a84ff;
-pub const ACCENT_HOVER: u32 = 0x339bff;
-pub const PURPLE: u32 = 0xbf5af2;
-pub const RED: u32 = 0xff453a;
-pub const RED_HOVER: u32 = 0xff6259;
+#[path = "../vendor/harness/theme_tokens.rs"]
+mod harness_tokens;
+pub use harness_tokens::*;
+
+#[path = "../vendor/harness/surface_chrome.rs"]
+pub mod chrome;
+#[path = "../vendor/harness/frost.rs"]
+mod harness_frost;
+#[path = "../vendor/harness/layered.rs"]
+mod harness_layered;
+pub use harness_frost::{MENU_BLUR, frosted};
+pub use harness_layered::layered;
+
+pub fn glass_card() -> Div {
+    chrome::card()
+}
+pub fn glass_shell() -> Hsla {
+    chrome::shell()
+}
+pub fn glass_inset() -> Hsla {
+    chrome::inset()
+}
 
 pub const BODY: f32 = 13.;
 pub const SMALL: f32 = 11.;
@@ -30,11 +37,7 @@ pub fn alpha(c: u32, a: f32) -> Hsla {
 }
 
 pub fn separator() -> Hsla {
-    alpha(0xffffff, 0.09)
-}
-
-pub fn hairline_dark() -> Hsla {
-    alpha(0x000000, 0.55)
+    alpha(0xffffff, 0.065)
 }
 
 pub fn tabular() -> FontFeatures {
@@ -42,11 +45,20 @@ pub fn tabular() -> FontFeatures {
 }
 
 fn control_shadow() -> Vec<BoxShadow> {
-    vec![BoxShadow { color: alpha(0x000000, 0.35), offset: point(px(0.), px(0.5)), blur_radius: px(1.), spread_radius: px(0.), inset: false }]
+    vec![BoxShadow {
+        color: alpha(0x000000, 0.35),
+        offset: point(px(0.), px(0.5)),
+        blur_radius: px(1.),
+        spread_radius: px(0.),
+        inset: false,
+    }]
 }
 
 pub fn small(text: impl Into<SharedString>) -> Div {
-    div().text_size(px(SMALL)).text_color(rgb(MUTED)).child(text.into())
+    div()
+        .text_size(px(SMALL))
+        .text_color(rgb(MUTED))
+        .child(text.into())
 }
 
 fn push_button_base(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Stateful<Div> {
@@ -58,11 +70,11 @@ fn push_button_base(id: impl Into<ElementId>, label: impl Into<SharedString>) ->
         .justify_center()
         .gap_1()
         .px(px(10.))
-        .h(px(24.))
-        .rounded(px(6.))
-        .bg(rgb(CONTROL))
-        .border_t_1()
-        .border_color(alpha(0xffffff, 0.12))
+        .h(px(chrome::CONTROL_SIZE))
+        .rounded(px(chrome::CONTROL_RADIUS))
+        .bg(alpha(0xffffff, 0.07))
+        .border_1()
+        .border_color(separator())
         .shadow(control_shadow())
         .text_size(px(BODY))
         .text_color(rgb(TEXT))
@@ -72,7 +84,9 @@ fn push_button_base(id: impl Into<ElementId>, label: impl Into<SharedString>) ->
 
 /// Push button.
 pub fn button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Stateful<Div> {
-    push_button_base(id, label).hover(|s| s.bg(rgb(CONTROL_HOVER))).active(|s| s.bg(rgb(0x5e5e60)))
+    push_button_base(id, label)
+        .hover(|s| s.bg(alpha(0xffffff, 0.12)))
+        .active(|s| s.bg(alpha(0xffffff, 0.12)))
 }
 
 /// Default (accent) push button.
@@ -80,10 +94,10 @@ pub fn primary_button(id: impl Into<ElementId>, label: impl Into<SharedString>) 
     push_button_base(id, label)
         .bg(rgb(ACCENT))
         .border_color(alpha(0xffffff, 0.2))
-        .text_color(rgb(0xffffff))
+        .text_color(rgb(0x14121f))
         .font_weight(FontWeight::MEDIUM)
         .hover(|s| s.bg(rgb(ACCENT_HOVER)))
-        .active(|s| s.bg(rgb(0x0070e0)))
+        .active(|s| s.bg(rgb(ACCENT_HOVER)))
 }
 
 /// Borderless toolbar button: no fill until hovered.
@@ -97,7 +111,7 @@ pub fn toolbar_button(id: impl Into<ElementId>, label: impl Into<SharedString>) 
         .gap_1()
         .px_2()
         .h(px(28.))
-        .rounded(px(6.))
+        .rounded(px(chrome::CONTROL_RADIUS))
         .text_size(px(BODY))
         .text_color(rgb(MUTED))
         .cursor_default()
@@ -108,12 +122,21 @@ pub fn toolbar_button(id: impl Into<ElementId>, label: impl Into<SharedString>) 
 
 /// Bold group header, as in inspectors.
 pub fn section_title(label: &'static str) -> Div {
-    div().text_size(px(BODY)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(TEXT)).child(label)
+    div()
+        .text_size(px(BODY))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(rgb(TEXT))
+        .child(label)
 }
 
 /// Small grey header above an inset group, as in System Settings and sidebars.
 pub fn group_title(label: &'static str) -> Div {
-    div().px(px(10.)).text_size(px(SMALL)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(MUTED)).child(label)
+    div()
+        .px(px(10.))
+        .text_size(px(SMALL))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(rgb(MUTED))
+        .child(label)
 }
 
 /// Inset rounded group of rows.
@@ -121,8 +144,8 @@ pub fn group() -> Div {
     div()
         .flex()
         .flex_col()
-        .rounded(px(10.))
-        .bg(rgb(GROUP))
+        .rounded(px(PANEL_RADIUS))
+        .bg(glass_inset())
         .border_1()
         .border_color(alpha(0xffffff, 0.06))
         .overflow_hidden()
@@ -166,11 +189,15 @@ pub fn fmt_date(secs: u64) -> String {
 }
 
 /// One option in a segmented control.
-pub fn segment(id: impl Into<ElementId>, label: impl Into<SharedString>, on: bool) -> Stateful<Div> {
+pub fn segment(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    on: bool,
+) -> Stateful<Div> {
     div()
         .id(id)
         .px(px(10.))
-        .h(px(20.))
+        .h(px(24.))
         .flex()
         .items_center()
         .justify_center()
@@ -178,14 +205,28 @@ pub fn segment(id: impl Into<ElementId>, label: impl Into<SharedString>, on: boo
         .text_size(px(BODY))
         .cursor_default()
         .when(on, |d| {
-            d.bg(rgb(0x636366)).text_color(rgb(0xffffff)).shadow(control_shadow()).border_t_1().border_color(alpha(0xffffff, 0.12))
+            d.bg(rgb(CONTROL_HOVER))
+                .text_color(rgb(0xffffff))
+                .shadow(control_shadow())
+                .border_1()
+                .border_color(separator())
         })
-        .when(!on, |d| d.text_color(rgb(TEXT)).hover(|s| s.bg(alpha(0xffffff, 0.05))))
+        .when(!on, |d| {
+            d.text_color(rgb(MUTED))
+                .hover(|s| s.bg(alpha(0xffffff, 0.05)))
+        })
         .child(label.into())
 }
 
 pub fn segments() -> Div {
-    div().flex().p(px(2.)).gap(px(1.)).rounded(px(7.)).bg(alpha(0xffffff, 0.08))
+    div()
+        .flex()
+        .p(px(3.))
+        .gap(px(2.))
+        .rounded(px(8.))
+        .bg(alpha(0x000000, 0.18))
+        .border_1()
+        .border_color(separator())
 }
 
 /// macOS switch.
@@ -200,7 +241,11 @@ pub fn switch(on: bool) -> Div {
         .when(on, |d| d.bg(rgb(ACCENT)).justify_end())
         .when(!on, |d| d.bg(alpha(0xffffff, 0.16)))
         .child(
-            div().size(px(16.)).rounded_full().bg(rgb(if on { 0xffffff } else { 0xdcdcdc })).shadow(control_shadow()),
+            div()
+                .size(px(16.))
+                .rounded_full()
+                .bg(rgb(if on { 0xffffff } else { 0xdcdcdc }))
+                .shadow(control_shadow()),
         )
 }
 

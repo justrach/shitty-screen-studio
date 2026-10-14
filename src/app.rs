@@ -1,3 +1,7 @@
+#[path = "accounts.rs"]
+mod accounts;
+#[path = "home.rs"]
+mod home;
 use crate::capture::{self, RecState, RecordOptions, RecordingHandle, Source, Sources};
 use crate::editor::Editor;
 use crate::project::{self, Project};
@@ -46,6 +50,7 @@ fn load_recent() -> Vec<Recent> {
 
 enum Screen {
     Home,
+    Agents(Entity<accounts::Agents>),
     Recording,
     Busy(String),
     Editor(Entity<Editor>),
@@ -55,6 +60,7 @@ pub struct Studio {
     screen: Screen,
     recordings: Vec<Recent>,
     error: Option<String>,
+    permission_error: bool,
     recorder: Option<Rc<RecordingHandle>>,
     bar: Option<WindowHandle<RecBar>>,
     tray: Option<crate::tray::StatusItem>,
@@ -64,17 +70,22 @@ pub struct Studio {
     window: Option<u32>,
     area: Option<Source>,
     sources: Option<Result<Sources, String>>,
+    screen_access: bool,
+    loading_sources: bool,
+    screen_request_attempted: bool,
     picker: Option<WindowHandle<AreaPicker>>,
     _sources_task: Option<Task<()>>,
+    _permission_task: Option<Task<()>>,
     _task: Option<Task<()>>,
 }
 
 impl Studio {
-    pub fn new(open: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(open: Option<PathBuf>, request_access: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut this = Self {
             screen: Screen::Home,
             recordings: load_recent(),
             error: None,
+            permission_error: false,
             recorder: None,
             bar: None,
             tray: None,
@@ -84,11 +95,18 @@ impl Studio {
             window: None,
             area: None,
             sources: None,
+            screen_access: capture::screen_access(),
+            loading_sources: false,
+            screen_request_attempted: false,
             picker: None,
             _sources_task: None,
+            _permission_task: None,
             _task: None,
         };
         this.load_sources(cx);
+        if request_access && !this.screen_access {
+            this.request_screen_access(cx);
+        }
         if let Some(dir) = open {
             this.open_project(dir, window, cx);
         }
@@ -96,6 +114,17 @@ impl Studio {
     }
 
     fn load_sources(&mut self, cx: &mut Context<Self>) {
+        if self.loading_sources {
+            return;
+        }
+        self.screen_access = capture::screen_access();
+        if !self.screen_access {
+            self.sources = None;
+            cx.notify();
+            return;
+        }
+        self.loading_sources = true;
+        self.sources = None;
         let task = cx.background_executor().spawn(async { capture::list_sources().map_err(|e| format!("{e:#}")) });
         self._sources_task = Some(cx.spawn(async move |this, cx| {
             let sources = task.await;
@@ -106,12 +135,44 @@ impl Studio {
                     }
                 }
                 this.sources = Some(sources);
+                this.loading_sources = false;
                 cx.notify();
             });
         }));
     }
 
+    fn request_screen_access(&mut self, cx: &mut Context<Self>) {
+        if self.loading_sources || self.screen_request_attempted {
+            return;
+        }
+        self.loading_sources = true;
+        self.screen_request_attempted = true;
+        let task = cx.background_executor().spawn(async { capture::request_screen_access() });
+        self._sources_task = Some(cx.spawn(async move |this, cx| {
+            let _ = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.loading_sources = false;
+                this.load_sources(cx);
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    fn open_privacy_settings(&mut self, cx: &mut Context<Self>) {
+        if let Err(e) = std::process::Command::new("/usr/bin/open")
+            .arg("x-apple.systempreferences:com.apple.preference.security")
+            .spawn()
+        {
+            self.error = Some(format!("Could not open System Settings: {e}"));
+            cx.notify();
+        }
+    }
+
     fn source(&self) -> Option<Source> {
+        if !self.screen_access || !matches!(self.sources, Some(Ok(_))) {
+            return None;
+        }
         let main = || {
             self.display.or_else(|| {
                 let s = self.sources.as_ref()?.as_ref().ok()?;
@@ -179,6 +240,7 @@ impl Studio {
     }
 
     fn open_project(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.permission_error = false;
         match Project::load(&dir) {
             Ok(project) => {
                 let studio = cx.entity().downgrade();
@@ -192,6 +254,7 @@ impl Studio {
     }
 
     fn open_demo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.permission_error = false;
         let dir = project::library_dir().join("demo");
         self.screen = Screen::Busy("Building demo recording…".into());
         cx.notify();
@@ -208,19 +271,49 @@ impl Studio {
         }));
     }
 
+    fn open_agents(&mut self, cx: &mut Context<Self>) {
+        let studio = cx.entity().downgrade();
+        self.screen = Screen::Agents(cx.new(|cx| accounts::Agents::new(studio, cx)));
+        cx.notify();
+    }
+
     fn start_recording(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.source().is_none() {
+        if !matches!(self.screen, Screen::Home) || self.source().is_none() {
             return;
         }
+        let options = self.options;
+        self.screen = Screen::Busy("Checking recording permissions… Respond to any macOS dialog to continue.".into());
+        self.error = None;
+        self.permission_error = false;
+        cx.notify();
+        let task = cx.background_executor().spawn(async move { capture::ensure_recording_access(options) });
+        self._permission_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| match result {
+                Ok(()) => this.begin_recording(window, cx),
+                Err(e) => {
+                    this.error = Some(format!("{e:#}"));
+                    this.permission_error = true;
+                    this.go_home(cx);
+                    this.load_sources(cx);
+                }
+            });
+        }));
+    }
+
+    fn begin_recording(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(source) = self.source() else {
+            self.go_home(cx);
+            return;
+        };
         let dir = match project::new_recording_dir() {
             Ok(d) => d,
             Err(e) => {
                 self.error = Some(format!("{e:#}"));
-                cx.notify();
+                self.go_home(cx);
                 return;
             }
         };
-        let Some(source) = self.source() else { return };
         self.options.source = source;
         let handle = Rc::new(RecordingHandle::start(dir, self.options));
         let bar_handle = handle.clone();
@@ -317,280 +410,6 @@ impl Studio {
         }
     }
 
-    fn render_home(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .size_full()
-            .flex()
-            .child(self.render_library(cx))
-            .child(
-                div()
-                    .id("home")
-                    .flex_1()
-                    .h_full()
-                    .bg(rgb(BG))
-                    .overflow_y_scroll()
-                    .flex()
-                    .justify_center()
-                    .child(self.render_new_recording(cx)),
-            )
-            .into_any_element()
-    }
-
-    fn render_library(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let rows: Vec<_> = self
-            .recordings
-            .iter()
-            .enumerate()
-            .map(|(i, r)| {
-                let dir = r.dir.clone();
-                div()
-                    .id(("recent", i))
-                    .flex()
-                    .flex_col()
-                    .px(px(10.))
-                    .py(px(6.))
-                    .rounded(px(6.))
-                    .cursor_default()
-                    .hover(|s| s.bg(alpha(0xffffff, 0.07)))
-                    .active(|s| s.bg(alpha(ACCENT, 0.6)))
-                    .child(div().text_size(px(BODY)).text_color(rgb(TEXT)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(r.title.clone()))
-                    .child(small(r.detail.clone()).font_features(tabular()))
-                    .on_click(cx.listener(move |this, _, window, cx| this.open_project(dir.clone(), window, cx)))
-            })
-            .collect();
-        div()
-            .w(px(250.))
-            .flex_none()
-            .h_full()
-            .flex()
-            .flex_col()
-            .bg(alpha(0x202020, 0.78))
-            .border_r_1()
-            .border_color(hairline_dark())
-            .child(div().h(px(52.)).flex_none())
-            .child(group_title("Recordings").px(px(20.)).pb_1())
-            .child(
-                div()
-                    .id("library")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .px(px(10.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(1.))
-                    .when(rows.is_empty(), |d| d.child(small("No recordings yet.").px(px(10.)).py_1()))
-                    .children(rows),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .p(px(10.))
-                    .border_t_1()
-                    .border_color(separator())
-                    .child(toolbar_button("demo", "Open Demo Recording").on_click(cx.listener(|this, _, window, cx| this.open_demo(window, cx)))),
-            )
-            .into_any_element()
-    }
-
-    fn render_new_recording(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let can_record = self.source().is_some();
-        div()
-            .w(px(480.))
-            .pt(px(64.))
-            .pb(px(40.))
-            .flex()
-            .flex_col()
-            .gap_5()
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(div().text_size(px(22.)).font_weight(FontWeight::BOLD).child("New Recording"))
-                    .child(
-                        div()
-                            .text_size(px(BODY))
-                            .text_color(rgb(MUTED))
-                            .child("Smooth zooms, a pretty background and a big cursor are added for you."),
-                    ),
-            )
-            .child(self.render_source(cx))
-            .child(self.render_inputs(cx))
-            .when_some(self.error.clone(), |d, e| {
-                d.child(
-                    div()
-                        .p_3()
-                        .rounded(px(10.))
-                        .bg(alpha(RED, 0.12))
-                        .border_1()
-                        .border_color(alpha(RED, 0.35))
-                        .text_size(px(BODY))
-                        .child(e),
-                )
-            })
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(
-                        div()
-                            .id("record")
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .gap_2()
-                            .h(px(36.))
-                            .rounded(px(8.))
-                            .bg(rgb(RED))
-                            .border_t_1()
-                            .border_color(alpha(0xffffff, 0.2))
-                            .text_size(px(BODY))
-                            .text_color(rgb(0xffffff))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .cursor_default()
-                            .child(div().size(px(10.)).rounded_full().bg(rgb(0xffffff)))
-                            .child("Start Recording")
-                            .when(can_record, |d| d.hover(|s| s.bg(rgb(RED_HOVER))))
-                            .when(!can_record, |d| d.opacity(0.4))
-                            .on_click(cx.listener(|this, _, window, cx| this.start_recording(window, cx))),
-                    )
-                    .child(
-                        small(format!("Records at up to 120 fps. The app hides itself from the capture. Press {} to stop, or use the floating bar or the menu bar.", crate::tray::STOP_SHORTCUT))
-                            .text_color(rgb(TERTIARY))
-                            .px(px(2.)),
-                    ),
-            )
-            .into_any_element()
-    }
-
-    fn render_source(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let tabs = [(Tab::Display, "Display"), (Tab::Window, "Window"), (Tab::Area, "Area")].map(|(tab, label)| {
-            segment(label, label, self.tab == tab).flex_1().on_click(cx.listener(move |this, _, _, cx| {
-                this.tab = tab;
-                if tab == Tab::Window {
-                    this.load_sources(cx);
-                }
-                cx.notify();
-            }))
-        });
-        let row = |id: gpui::ElementId, first: bool, selected: bool, content: Div| {
-            group_row(first)
-                .id(id)
-                .gap_2()
-                .cursor_default()
-                .hover(|s| s.bg(alpha(0xffffff, 0.04)))
-                .child(content.flex_1().min_w_0().flex().items_center().gap_2())
-                .child(check(selected))
-        };
-        let note = |s: String| group().child(group_row(true).child(small(s))).into_any_element();
-        let sources = match &self.sources {
-            None => Err("Looking for screens and windows…".to_string()),
-            Some(Err(e)) => Err(e.clone()),
-            Some(Ok(s)) => Ok(s.clone()),
-        };
-        let body = match (self.tab, sources) {
-            (_, Err(msg)) if self.tab != Tab::Area => note(msg),
-            (Tab::Display, Ok(s)) => {
-                let current = self.display.or(s.displays.first().map(|d| d.id));
-                group()
-                    .children(s.displays.iter().enumerate().map(|(i, d)| {
-                        let id = d.id;
-                        let content = div()
-                            .child(div().flex_1().child(if d.main { "Main Display".to_string() } else { format!("Display {}", i + 1) }))
-                            .child(small(format!("{:.0} × {:.0}", d.width, d.height)).font_features(tabular()));
-                        row(("display", i).into(), i == 0, current == Some(id), content)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.display = Some(id);
-                                cx.notify();
-                            }))
-                    }))
-                    .into_any_element()
-            }
-            (Tab::Window, Ok(s)) if s.windows.is_empty() => note("No windows found.".into()),
-            (Tab::Window, Ok(s)) => group()
-                .child(
-                    div().id("windows").max_h(px(260.)).overflow_y_scroll().children(s.windows.iter().enumerate().map(|(i, w)| {
-                        let id = w.id;
-                        let content = div()
-                            .child(match w.icon.clone() {
-                                Some(icon) => img(icon).flex_none().size(px(20.)).into_any_element(),
-                                None => div().flex_none().size(px(20.)).rounded(px(5.)).bg(alpha(0xffffff, 0.1)).into_any_element(),
-                            })
-                            .child(div().flex_none().whitespace_nowrap().child(w.app.clone()))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .text_color(rgb(MUTED))
-                                    .child(w.title.clone()),
-                            );
-                        row(("window", id as usize).into(), i == 0, self.window == Some(id), content)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.window = Some(id);
-                                cx.notify();
-                            }))
-                    })),
-                )
-                .into_any_element(),
-            (_, _) => {
-                let label = match self.area {
-                    Some(Source::Area { w, h, x, y, .. }) => format!("{w:.0} × {h:.0} at {x:.0}, {y:.0}"),
-                    _ => "No area selected".into(),
-                };
-                group()
-                    .child(
-                        group_row(true)
-                            .child(div().text_color(rgb(if self.area.is_some() { TEXT } else { MUTED })).font_features(tabular()).child(label))
-                            .child(
-                                button("pick-area", if self.area.is_some() { "Reselect…" } else { "Select Area…" })
-                                    .on_click(cx.listener(|this, _, _, cx| this.pick_area(cx))),
-                            ),
-                    )
-                    .into_any_element()
-            }
-        };
-        div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(group_title("Source"))
-            .child(segments().children(tabs))
-            .child(body)
-            .into_any_element()
-    }
-
-    fn render_inputs(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let item = |id: &'static str, label: &'static str, first: bool, on: bool, f: fn(&mut RecordOptions)| {
-            group_row(first)
-                .id(id)
-                .cursor_default()
-                .child(label)
-                .child(switch(on))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    f(&mut this.options);
-                    cx.notify();
-                }))
-        };
-        div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(group_title("Inputs"))
-            .child(
-                group()
-                    .child(item("mic", "Microphone", true, self.options.mic, |o| o.mic = !o.mic))
-                    .child(item("sys-audio", "System Audio", false, self.options.system_audio, |o| o.system_audio = !o.system_audio))
-                    .child(item("camera", "Camera", false, self.options.camera, |o| o.camera = !o.camera))
-                    .child(item("keys", "Keyboard Shortcuts", false, self.options.keys, |o| o.keys = !o.keys)),
-            )
-            .into_any_element()
-    }
-
     fn render_status(&self, msg: String, cx: &mut Context<Self>, stop: bool) -> AnyElement {
         div()
             .size_full()
@@ -613,6 +432,7 @@ impl Render for Studio {
         let body = match &self.screen {
             Screen::Editor(e) => e.clone().into_any_element(),
             Screen::Home => self.render_home(cx),
+            Screen::Agents(agents) => agents.clone().into_any_element(),
             Screen::Busy(msg) => self.render_status(msg.clone(), cx, false),
             Screen::Recording => self.render_status("Recording…".into(), cx, true),
         };

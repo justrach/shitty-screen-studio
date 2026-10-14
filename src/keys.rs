@@ -89,7 +89,7 @@ pub fn ensure_access() -> Result<()> {
     if CGPreflightListenEventAccess() || CGRequestListenEventAccess() {
         return Ok(());
     }
-    bail!("keystroke access is off. Turn on Shitty Screen Studio in System Settings → Privacy & Security → Input Monitoring, then quit and reopen the app.")
+    bail!("Keyboard Shortcuts needs Input Monitoring access. Enable Recorder in System Settings → Privacy & Security → Input Monitoring, then quit and reopen the app. You can also turn off Keyboard Shortcuts in Inputs to record without shortcut labels.")
 }
 
 type Presses = Mutex<Vec<KeyPress>>;

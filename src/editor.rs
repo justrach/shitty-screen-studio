@@ -4,8 +4,11 @@ use crate::export::{ExportJob, ExportSettings, export};
 use crate::motion::Motion;
 use crate::player::{Player, Scene};
 use crate::project::{Click, Project, ZoomSegment};
-use crate::style::{Aspect, BACKGROUNDS, Style, WALLPAPERS, wallpaper_file};
+use crate::style::{CursorStyle, Aspect, BACKGROUNDS, Style, WALLPAPERS, wallpaper_file};
 use crate::theme::*;
+#[path = "agent_ui.rs"]
+mod agent_ui;
+use agent_ui::Assistant;
 use gpui::{
     AnyElement, Bounds, Context, FocusHandle, FontWeight, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, Pixels, Task, WeakEntity, Window,
@@ -87,7 +90,38 @@ enum Drag {
 
 const MIN_ZOOM_LEN: f64 = 0.4;
 
+/// Neighbor boundaries keep a moved or resized zoom in its own free interval.
+fn zoom_limits(zooms: &[ZoomSegment], index: usize, duration: f64) -> (f64, f64) {
+    let lo = zooms[..index].iter().map(|z| z.end).fold(0.0, f64::max);
+    let hi = zooms[index + 1..].iter().map(|z| z.start).fold(duration, f64::min);
+    (lo, hi)
+}
+
+fn normalize_zooms(zooms: &mut Vec<ZoomSegment>) {
+    zooms.sort_by(|a, b| a.start.total_cmp(&b.start));
+    let mut end: f64 = 0.0;
+    zooms.retain_mut(|z| {
+        z.start = z.start.max(end);
+        if z.end <= z.start { return false; }
+        end = z.end;
+        true
+    });
+}
+
+fn available_zoom_end(zooms: &[ZoomSegment], start: f64, proposed_end: f64) -> Option<f64> {
+    if zooms.iter().any(|z| start >= z.start && start < z.end) { return None; }
+    let end = zooms.iter().filter(|z| z.start >= start).map(|z| z.start)
+        .fold(proposed_end, f64::min);
+    (end - start >= MIN_ZOOM_LEN).then_some(end)
+}
+
+fn moved_zoom_bounds(desired: f64, length: f64, lo: f64, hi: f64) -> (f64, f64) {
+    let start = desired.clamp(lo, (hi - length).max(lo));
+    (start, (start + length).min(hi))
+}
+
 pub struct Editor {
+    assistant: Assistant,
     project: Project,
     style: Style,
     zooms: Vec<ZoomSegment>,
@@ -97,7 +131,8 @@ pub struct Editor {
     seen_frames: u64,
     selected: Option<usize>,
     selected_slice: Option<usize>,
-    history: Vec<(Vec<ZoomSegment>, Timeline)>,
+    history: Vec<(Vec<ZoomSegment>, Timeline, Style)>,
+    redo_history: Vec<(Vec<ZoomSegment>, Timeline, Style)>,
     drag: Option<Drag>,
     export_4k: bool,
     export_fps: u32,
@@ -115,7 +150,8 @@ pub struct Editor {
 impl Editor {
     pub fn new(project: Project, studio: WeakEntity<Studio>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let style = project.rec.style.unwrap_or_default();
-        let zooms = project.rec.zooms.clone().unwrap_or_else(|| project.rec.auto_zooms(style.zoom));
+        let mut zooms = project.rec.zooms.clone().unwrap_or_else(|| project.rec.auto_zooms(style.zoom));
+        normalize_zooms(&mut zooms);
         let clicks = project.rec.clicks();
         let timeline = project.rec.timeline();
         let scene = Arc::new(Scene {
@@ -127,6 +163,8 @@ impl Editor {
         });
         let player = Player::new(&project, scene);
         let focus = cx.focus_handle();
+        let input = cx.new(crate::composer::Composer::new);
+        cx.subscribe(&input, |this, _, _: &crate::composer::Submit, cx| this.send_agent(cx)).detach();
         window.focus(&focus, cx);
         #[cfg(feature = "snapshot")]
         if let Some(t) = std::env::var("SSS_SEEK").ok().and_then(|s| s.parse().ok()) {
@@ -162,6 +200,7 @@ impl Editor {
         });
 
         Self {
+            assistant: Assistant { visible: false, understand_video: true, input, run: None, status: String::new(), proposal: None, baseline: None },
             project,
             style,
             zooms,
@@ -172,6 +211,7 @@ impl Editor {
             selected: None,
             selected_slice: None,
             history: Vec::new(),
+            redo_history: Vec::new(),
             drag: None,
             export_4k: false,
             export_fps: 60,
@@ -203,7 +243,8 @@ impl Editor {
     fn poll(&mut self, cx: &mut Context<Self>) {
         self.player.tick();
         let frames = self.player.shared.frames.load(Ordering::Relaxed);
-        let mut changed = frames != self.seen_frames;
+        let agent_changed = self.poll_agent();
+        let mut changed = frames != self.seen_frames || agent_changed;
         self.seen_frames = frames;
         if let Some(job) = &self.export {
             let done = job.result.lock().unwrap().take();
@@ -241,16 +282,31 @@ impl Editor {
 
     /// Saves the timeline edits so the next change can be undone.
     fn checkpoint(&mut self) {
-        self.history.push((self.zooms.clone(), self.timeline.clone()));
+        self.redo_history.clear();
+        self.history.push((self.zooms.clone(), self.timeline.clone(), self.style));
         if self.history.len() > 100 {
             self.history.remove(0);
         }
     }
 
     fn undo(&mut self) {
-        let Some((zooms, timeline)) = self.history.pop() else { return };
+        let Some((zooms, timeline, style)) = self.history.pop() else { return };
+        self.redo_history.push((self.zooms.clone(), self.timeline.clone(), self.style));
+        self.style = style;
         self.zooms = zooms;
         self.timeline = timeline;
+        self.selected = None;
+        self.selected_slice = None;
+        self.refresh();
+        self.persist();
+    }
+
+    fn redo(&mut self) {
+        let Some((zooms, timeline, style)) = self.redo_history.pop() else { return };
+        self.history.push((self.zooms.clone(), self.timeline.clone(), self.style));
+        self.zooms = zooms;
+        self.timeline = timeline;
+        self.style = style;
         self.selected = None;
         self.selected_slice = None;
         self.refresh();
@@ -371,34 +427,37 @@ impl Editor {
             cx.notify();
             return;
         }
-        let dur = self.duration();
         match drag {
             Drag::Scrub => self.player.seek(self.time_at(ev.position.x)),
             Drag::Knob(k) => self.set_knob(k, ev.position.x),
             Drag::ZoomStart(i) => {
                 let t = self.src(self.time_at(ev.position.x));
+                let (lo, _) = zoom_limits(&self.zooms, i, self.project.rec.duration);
                 if let Some(z) = self.zooms.get_mut(i) {
-                    z.start = t.min(z.end - MIN_ZOOM_LEN).max(0.0);
+                    let min_len = MIN_ZOOM_LEN.min(z.end - z.start);
+                    z.start = t.min(z.end - min_len).max(lo);
                 }
                 self.refresh();
             }
             Drag::ZoomEnd(i) => {
                 let t = self.src(self.time_at(ev.position.x));
-                let src_dur = self.project.rec.duration;
+                let (_, src_dur) = zoom_limits(&self.zooms, i, self.project.rec.duration);
                 if let Some(z) = self.zooms.get_mut(i) {
-                    z.end = t.max(z.start + MIN_ZOOM_LEN).min(src_dur);
+                    let min_len = MIN_ZOOM_LEN.min(z.end - z.start);
+                    z.end = t.max(z.start + min_len).min(src_dur);
                 }
                 self.refresh();
             }
             Drag::ZoomMove { index, grab } => {
                 let t = self.time_at(ev.position.x);
                 if let Some(z) = self.zooms.get(index).copied() {
-                    let len = self.out(z.end) - self.out(z.start);
-                    let start = (t - grab).clamp(0.0, (dur - len).max(0.0));
-                    let (s, e) = (self.src(start), self.src(start + len));
+                    let len = z.end - z.start;
+                    let (lo, hi) = zoom_limits(&self.zooms, index, self.project.rec.duration);
+                    let desired = self.src((t - grab).clamp(0.0, self.duration()));
+                    let (start, end) = moved_zoom_bounds(desired, len, lo, hi);
                     if let Some(z) = self.zooms.get_mut(index) {
-                        z.start = s;
-                        z.end = e.max(s + MIN_ZOOM_LEN);
+                        z.start = start;
+                        z.end = end;
                     }
                 }
                 self.refresh();
@@ -435,10 +494,12 @@ impl Editor {
         }
     }
 
-    fn on_key(&mut self, ev: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.assistant.input.read(cx).focus.is_focused(window) { return; }
         let fps = crate::player::PREVIEW_FPS as f64;
         let cmd = ev.keystroke.modifiers.platform;
         match ev.keystroke.key.as_str() {
+            "z" if cmd && ev.keystroke.modifiers.shift => self.redo(),
             "z" if cmd => self.undo(),
             _ if cmd => return,
             "space" => self.toggle_play(),
@@ -456,12 +517,38 @@ impl Editor {
     }
 
     fn add_zoom(&mut self) {
+        self.add_zoom_at(self.player.position());
+    }
+
+    fn nudge_zoom_edge(&mut self, start: bool, delta: f64) {
+        let Some(i) = self.selected else { return };
+        let z = self.zooms[i];
+        let (lo, hi) = zoom_limits(&self.zooms, i, self.project.rec.duration);
+        let mut next = z;
+        let min_len = MIN_ZOOM_LEN.min(z.end - z.start);
+        if start {
+            next.start = self.src((self.out(z.start) + delta).max(0.0))
+                .min(z.end - min_len).max(lo);
+        } else {
+            next.end = self.src((self.out(z.end) + delta).min(self.duration()))
+                .max(z.start + min_len).min(hi);
+        }
+        if next == z { return; }
+        self.checkpoint();
+        self.zooms[i] = next;
+        self.refresh();
+        self.persist();
+    }
+
+    fn add_zoom_at(&mut self, position: f64) {
         let dur = self.duration();
-        let from = self.player.position().min((dur - 2.0).max(0.0));
-        let (start, end) = (self.src(from), self.src((from + 2.0).min(dur)));
-        if end - start < MIN_ZOOM_LEN {
+        let from = position.clamp(0.0, dur);
+        let start = self.src(from);
+        if let Some(i) = self.zooms.iter().position(|z| start >= z.start && start < z.end) {
+            self.select_zoom(Some(i));
             return;
         }
+        let Some(end) = available_zoom_end(&self.zooms, start, self.src((from + 2.0).min(dur))) else { return };
         self.checkpoint();
         self.zooms.push(ZoomSegment { start, end, scale: self.style.zoom });
         self.zooms.sort_by(|a, b| a.start.total_cmp(&b.start));
@@ -593,6 +680,9 @@ impl Editor {
                     }))
                 })))
                 .child(small("fps").mr_2())
+                .child(toolbar_button("assistant-toggle", "Codegraff").gap_2()
+                    .child(crate::icons::icon(crate::icons::GRAFF).size(px(16.)).text_color(rgb(ACCENT)))
+                    .on_click(cx.listener(|this, _, _, cx| { this.assistant.visible = !this.assistant.visible; cx.notify(); })))
                 .child(primary_button("export", "Export…").px(px(14.)).on_click(cx.listener(|this, _, _, cx| this.start_export(cx))))
                 .into_any_element()
         };
@@ -606,8 +696,8 @@ impl Editor {
             .pr(px(12.))
             .gap_2()
             .border_b_1()
-            .border_color(hairline_dark())
-            .bg(rgb(CHROME))
+            .border_color(separator())
+            .bg(alpha(CHROME, 0.98))
             .on_mouse_down(MouseButton::Left, |ev: &MouseDownEvent, window, _| {
                 if ev.click_count == 2 {
                     window.titlebar_double_click();
@@ -651,7 +741,9 @@ impl Editor {
                     .items_baseline()
                     .text_size(px(BODY))
                     .child(knob.label())
-                    .child(small(knob.format(v)).font_features(tabular())),
+                    .child(small(knob.format(v)).font_features(tabular())
+                        .text_color(rgb(ACCENT)).px_2().py(px(2.))
+                        .rounded(px(5.)).bg(alpha(ACCENT, 0.08))),
             )
             .child(
                 div()
@@ -662,6 +754,7 @@ impl Editor {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                            this.checkpoint();
                             this.drag = Some(Drag::Knob(knob));
                             this.set_knob(knob, ev.position.x);
                             cx.stop_propagation();
@@ -721,6 +814,7 @@ impl Editor {
             .text_size(px(BODY))
             .cursor_default()
             .on_click(cx.listener(move |this, _, _, cx| {
+                this.checkpoint();
                 f(&mut this.style);
                 this.refresh();
                 this.persist();
@@ -741,8 +835,10 @@ impl Editor {
                 .cursor_default()
                 .border_2()
                 .border_color(if selected { rgb(ACCENT).into() } else { alpha(0xffffff, 0.08) })
+                .hover(|s| s.border_color(alpha(ACCENT, 0.65)))
                 .bg(linear_gradient(135., linear_color_stop(rgb(bg.from), 0.), linear_color_stop(rgb(bg.to), 1.)))
                 .on_click(cx.listener(move |this, _, _, cx| {
+                    this.checkpoint();
                     this.style.background = i;
                     this.refresh();
                     this.persist();
@@ -752,6 +848,7 @@ impl Editor {
 
         let set_bg = |i: usize| {
             cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _: &mut Window, cx: &mut Context<Self>| {
+                this.checkpoint();
                 this.style.background = i;
                 this.refresh();
                 this.persist();
@@ -772,12 +869,14 @@ impl Editor {
                     .cursor_default()
                     .border_2()
                     .border_color(if selected { rgb(ACCENT).into() } else { alpha(0xffffff, 0.08) })
+                    .hover(|s| s.border_color(alpha(ACCENT, 0.65)))
                     .child(img(thumb).size_full().object_fit(ObjectFit::Cover))
                     .on_click(set_bg(i))
             })
             .collect();
         let aspects = Aspect::ALL.map(|a| {
             segment(a.label(), a.label(), self.style.aspect == a).flex_1().on_click(cx.listener(move |this, _, _, cx| {
+                this.checkpoint();
                 this.style.aspect = a;
                 this.refresh();
                 this.persist();
@@ -835,13 +934,19 @@ impl Editor {
             .id("sidebar")
             .w(px(288.))
             .flex_none()
-            .h_full()
+            .m_3()
+            .ml_0()
+            .rounded(px(16.))
             .overflow_y_scroll()
-            .border_l_1()
-            .border_color(hairline_dark())
-            .bg(rgb(CHROME))
+            .border_1()
+            .border_color(separator())
+            .bg(alpha(CHROME, 0.98))
             .flex()
             .flex_col()
+            .child(div().px_4().py_3().border_b_1().border_color(separator())
+                .flex().items_center().justify_between()
+                .child(section_title("Design"))
+                .child(crate::icons::icon(crate::icons::MAGIC).size(px(15.)).text_color(rgb(ACCENT))))
             .children(clip)
             .child(
                 section("Background")
@@ -860,9 +965,22 @@ impl Editor {
             .child(
                 section("Zoom")
                     .child(self.render_slider(Knob::Zoom, cx))
-                    .child(self.render_slider(Knob::CameraSpeed, cx))
-                    .child(self.render_slider(Knob::MotionBlur, cx))
                     .child(small(zoom_hint))
+                    .when_some(self.selected.and_then(|i| self.zooms.get(i).copied()), |d, z| {
+                        d.child(small(format!("Selected: {} → {}", fmt_time(self.out(z.start)), fmt_time(self.out(z.end))))
+                            .font_features(tabular()).text_color(rgb(TEXT)))
+                         .children([("Start", true), ("End", false)].map(|(label, start)| {
+                            div().flex().items_center().justify_between().gap_2()
+                                .child(small(label))
+                                .child(div().flex().gap_1()
+                                    .child(button(if start { "start-earlier" } else { "end-earlier" }, "−0.1s")
+                                        .on_click(cx.listener(move |this, _, _, cx| { this.nudge_zoom_edge(start, -0.1); cx.notify(); })))
+                                    .child(button(if start { "start-later" } else { "end-later" }, "+0.1s")
+                                        .on_click(cx.listener(move |this, _, _, cx| { this.nudge_zoom_edge(start, 0.1); cx.notify(); }))))
+                         }))
+                    })
+                    .child(self.render_slider(Knob::CameraSpeed, cx))
+                    .child(small("Camera speed applies to the whole video"))
                     .child(
                         div()
                             .flex()
@@ -870,6 +988,7 @@ impl Editor {
                             .child(button("auto-zoom", "Auto from Clicks").flex_1().on_click(cx.listener(|this, _, _, cx| {
                                 this.checkpoint();
                                 this.zooms = this.project.rec.auto_zooms(this.style.zoom);
+                                normalize_zooms(&mut this.zooms);
                                 this.selected = None;
                                 this.refresh();
                                 this.persist();
@@ -886,7 +1005,23 @@ impl Editor {
                     ),
             )
             .child(
-                section("Cursor")
+                section("Motion & Cursor")
+                    .child(small("Motion blur softens quick moves in preview and export."))
+                    .child(self.render_slider(Knob::MotionBlur, cx))
+                    .child(self.render_toggle("cursor-visible", "Show cursor", self.style.cursor_visible, cx, |s| {
+                        s.cursor_visible = !s.cursor_visible
+                    }))
+                    .child(small("Cursor style"))
+                    .child(segments().children(CursorStyle::ALL.into_iter().map(|style| {
+                        segment(("cursor-style", style.index()), style.label(), self.style.cursor_style == style)
+                            .flex_1().on_click(cx.listener(move |this, _, _, cx| {
+                                this.checkpoint();
+                                this.style.cursor_style = style;
+                                this.refresh();
+                                this.persist();
+                                cx.notify();
+                            }))
+                    })))
                     .child(self.render_slider(Knob::CursorSize, cx))
                     .child(self.render_slider(Knob::Smoothing, cx))
                     .child(self.render_toggle("ripple", "Click ripple", self.style.click_ripple, cx, |s| {
@@ -901,6 +1036,7 @@ impl Editor {
                     .map(|(i, label)| {
                         segment(("corner", i), label, corner as usize == i).px_1().text_size(px(SMALL)).flex_1().on_click(cx.listener(
                             move |this, _, _, cx| {
+                                this.checkpoint();
                                 this.style.camera_corner = i as u8;
                                 this.refresh();
                                 this.persist();
@@ -928,6 +1064,7 @@ impl Editor {
                         let pos = base + i;
                         segment(("keys-pos", pos), label, current as usize == pos).px_1().text_size(px(SMALL)).flex_1().on_click(cx.listener(
                             move |this, _, _, cx| {
+                                this.checkpoint();
                                 this.style.keys_position = pos as u8;
                                 this.refresh();
                                 this.persist();
@@ -1026,9 +1163,9 @@ impl Editor {
                 .left(frac(a))
                 .w(relative(((b - a) / dur) as f32))
                 .rounded(px(6.))
-                .bg(if is_sel { rgb(PURPLE).into() } else { alpha(PURPLE, 0.7) })
+                .bg(if is_sel { alpha(PURPLE, 0.48) } else { alpha(PURPLE, 0.18) })
                 .border_1()
-                .border_color(if is_sel { rgb(0xffffff).into() } else { alpha(0xffffff, 0.15) })
+                .border_color(if is_sel { rgb(PURPLE).into() } else { alpha(PURPLE, 0.35) })
                 .when(is_sel, |d| d.border_2())
                 .overflow_hidden()
                 .flex()
@@ -1152,13 +1289,16 @@ impl Editor {
                     .gap_1()
                     .font_features(tabular())
                     .child(div().text_size(px(15.)).font_weight(FontWeight::MEDIUM).child(fmt_time(pos)))
-                    .child(small(format!("/ {}", fmt_time(dur)))),
+                    .child(small(format!("/ {}", fmt_time(dur))))
+                    .child(toolbar_button("undo", "Undo").opacity(if self.history.is_empty() { 0.4 } else { 1.0 }).on_click(cx.listener(|this, _, _, cx| { this.undo(); cx.notify(); })))
+                    .child(toolbar_button("redo", "Redo").opacity(if self.redo_history.is_empty() { 0.4 } else { 1.0 }).on_click(cx.listener(|this, _, _, cx| { this.redo(); cx.notify(); }))),
             )
             .child(
                 toolbar_button("play", if playing { "❚❚" } else { "▶" })
-                    .w(px(36.))
+                    .w(px(36.)).h(px(36.)).rounded_full()
+                    .bg(alpha(ACCENT, 0.14)).border_1().border_color(alpha(ACCENT, 0.22))
                     .text_size(px(15.))
-                    .text_color(rgb(TEXT))
+                    .text_color(rgb(ACCENT))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.toggle_play();
                         cx.notify();
@@ -1212,17 +1352,30 @@ impl Editor {
             .child(div().relative().h(px(40.)).mx(px(-1.5)).children(slices).children(click_dots))
             .child(
                 div()
+                    .id("zoom-lane")
                     .relative()
                     .h(px(30.))
                     .rounded(px(6.))
                     .bg(alpha(0xffffff, 0.04))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(alpha(ACCENT, 0.08)))
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, ev: &MouseDownEvent, window, cx| {
+                        window.focus(&this.focus, cx);
+                        let position = this.time_at(ev.position.x);
+                        this.drag = None;
+                        this.selected_slice = None;
+                        this.player.seek(position);
+                        this.add_zoom_at(position);
+                        cx.stop_propagation();
+                        cx.notify();
+                    }))
                     .when(self.zooms.is_empty(), |d| {
                         d.flex()
                             .items_center()
                             .px_2()
                             .text_size(px(SMALL))
                             .text_color(rgb(TERTIARY))
-                            .child("No zooms. Use Add Zoom or Auto from Clicks.")
+                            .child("+ Click anywhere here to add a zoom")
                     })
                     .children(segments),
             )
@@ -1241,8 +1394,8 @@ impl Editor {
         div()
             .flex_none()
             .border_t_1()
-            .border_color(hairline_dark())
-            .bg(rgb(CHROME))
+            .border_color(separator())
+            .bg(alpha(CHROME, 0.98))
             .px_4()
             .pt_2()
             .pb_4()
@@ -1250,6 +1403,9 @@ impl Editor {
             .flex_col()
             .gap_3()
             .child(controls)
+            .child(div().flex().items_center().justify_between()
+                .child(small("VIDEO / ZOOMS"))
+                .child(small("Click empty zoom lane to add · drag edges to resize · ⌘Z undo · ⇧⌘Z redo")))
             .child(track)
     }
 }
@@ -1276,7 +1432,7 @@ impl Render for Editor {
                 .into_any_element(),
         };
 
-        div()
+        layered(div()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
@@ -1290,10 +1446,10 @@ impl Render for Editor {
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(STAGE))
+            .bg(glass_shell())
             .text_size(px(BODY))
             .text_color(rgb(TEXT))
-            .child(self.render_topbar(cx))
+            .child(frosted(0., MENU_BLUR, self.render_topbar(cx)))
             .child(
                 div()
                     .flex_1()
@@ -1312,8 +1468,44 @@ impl Render for Editor {
                             }))
                             .child(preview),
                     )
-                    .child(self.render_sidebar(cx)),
+                    .child(if self.assistant.visible { self.render_agent(cx) } else { frosted(16., MENU_BLUR, self.render_sidebar(cx)).into_any_element() }),
             )
-            .child(self.render_timeline(cx))
+            .child(frosted(0., MENU_BLUR, self.render_timeline(cx))))
+    }
+}
+
+#[cfg(test)]
+mod zoom_edit_tests {
+    use super::*;
+    fn zoom(start: f64, end: f64) -> ZoomSegment {
+        ZoomSegment { start, end, scale: 2.0 }
+    }
+    #[test]
+    fn insertion_uses_free_space_and_rejects_occupied_or_tiny_gaps() {
+        let zooms = vec![zoom(2.0, 4.0), zoom(5.0, 7.0)];
+        assert_eq!(available_zoom_end(&zooms, 4.0, 6.0), Some(5.0));
+        assert_eq!(available_zoom_end(&zooms, 3.0, 5.0), None);
+        assert_eq!(available_zoom_end(&zooms, 4.8, 6.8), None);
+        assert_eq!(available_zoom_end(&zooms, 7.0, 9.0), Some(9.0));
+    }
+    #[test]
+    fn end_of_recording_shortens_zoom_without_moving_start() {
+        assert_eq!(available_zoom_end(&[], 34.0, 35.0), Some(35.0));
+        assert_eq!(available_zoom_end(&[], 35.0, 35.0), None);
+    }
+    #[test]
+    fn moving_across_speeds_preserves_source_length_without_crossing_neighbor() {
+        let (start, end) = moved_zoom_bounds(4.175, 0.4, 0.0, 4.2);
+        assert!((start - 3.8).abs() < 1e-9);
+        assert!((end - 4.2).abs() < 1e-9);
+        assert!((end - start - 0.4).abs() < 1e-9);
+    }
+    #[test]
+    fn legacy_overlaps_are_ordered_trimmed_and_have_safe_drag_bounds() {
+        let mut zooms = vec![zoom(4.0, 7.0), zoom(1.0, 5.0), zoom(6.0, 6.2), zoom(8.0, 8.2)];
+        normalize_zooms(&mut zooms);
+        assert_eq!(zooms, vec![zoom(1.0, 5.0), zoom(5.0, 7.0), zoom(8.0, 8.2)]);
+        assert_eq!(zoom_limits(&zooms, 0, 10.0), (0.0, 5.0));
+        assert_eq!(zoom_limits(&zooms, 1, 10.0), (5.0, 8.0));
     }
 }

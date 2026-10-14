@@ -16,6 +16,9 @@ mod project;
 mod style;
 mod theme;
 mod video;
+mod icons;
+mod agent;
+mod composer;
 
 use gpui::{
     App, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions, WindowBounds, WindowOptions, actions,
@@ -23,7 +26,7 @@ use gpui::{
 };
 use std::path::PathBuf;
 
-actions!(shitty_screen_studio, [Quit]);
+actions!(recorder, [Quit]);
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -56,19 +59,21 @@ fn main() {
         }
         return;
     }
-    let open = args.get(1).map(PathBuf::from);
+    let request_access = args.iter().any(|arg| arg == "--request-screen-access");
+    let open = args.get(1).filter(|arg| !arg.starts_with("--")).map(PathBuf::from);
 
-    gpui_platform::application().run(move |cx: &mut App| {
+    gpui_platform::application().with_assets(icons::Assets).run(move |cx: &mut App| {
+        theme::chrome::sync_native_appearance();
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
-        cx.set_menus([Menu::new("Shitty Screen Studio").items([MenuItem::action("Quit", Quit)])]);
+        cx.set_menus([Menu::new("Recorder").items([MenuItem::action("Quit", Quit)])]);
 
         let bounds = Bounds::centered(None, size(px(1400.), px(900.)), cx);
         let main_window = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
-                    title: Some("Shitty Screen Studio".into()),
+                    title: Some("Recorder".into()),
                     appears_transparent: true,
                     traffic_light_position: Some(point(px(18.), px(19.))),
                 }),
@@ -76,7 +81,7 @@ fn main() {
                 window_min_size: Some(size(px(960.), px(640.))),
                 ..Default::default()
             },
-            move |window, cx| cx.new(|cx| app::Studio::new(open, window, cx)),
+            move |window, cx| cx.new(|cx| app::Studio::new(open, request_access, window, cx)),
         )
         .expect("open main window");
         #[cfg(feature = "snapshot")]

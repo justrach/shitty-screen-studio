@@ -326,6 +326,7 @@ fn uniforms(p: &Params, t: f64, w: u32, h: u32, cam: Option<(u32, u32)>, wall: O
 
     let k = px_per_pt * st.cursor_size;
     let cursor_at = |t: f64| -> Option<[f32; 4]> {
+        if !st.cursor_visible { return None; }
         let (cx, cy) = p.motion.at(t).cursor;
         if !((-0.01..=1.01).contains(&cx) && (-0.01..=1.01).contains(&cy)) {
             return None;
@@ -396,7 +397,7 @@ pub struct Gpu {
     pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     linear: Retained<ProtocolObject<dyn MTLSamplerState>>,
     mip: Retained<ProtocolObject<dyn MTLSamplerState>>,
-    sprite: Texture,
+    sprite: [Texture; 3],
     cache: CFRetained<CVMetalTextureCache>,
     uploads: [Option<Texture>; 2],
     target: Option<Texture>,
@@ -457,15 +458,19 @@ impl Gpu {
             bail!("texture cache: {status}");
         }
         let cache = unsafe { CFRetained::from_raw(NonNull::new_unchecked(cache)) };
-        let sprite = Self::make_sprite(&device, &queue)?;
+        let sprite = [
+            Self::make_sprite(&device, &queue, crate::style::CursorStyle::Black)?,
+            Self::make_sprite(&device, &queue, crate::style::CursorStyle::White)?,
+            Self::make_sprite(&device, &queue, crate::style::CursorStyle::Amber)?,
+        ];
         Ok(Self { device, queue, pipeline, linear, mip, sprite, cache, uploads: [None, None], target: None, nv12: Some(nv12), wallpaper: None, label: None })
     }
 
-    fn make_sprite(device: &ProtocolObject<dyn MTLDevice>, queue: &ProtocolObject<dyn objc2_metal::MTLCommandQueue>) -> Result<Texture> {
+    fn make_sprite(device: &ProtocolObject<dyn MTLDevice>, queue: &ProtocolObject<dyn objc2_metal::MTLCommandQueue>, style: crate::style::CursorStyle) -> Result<Texture> {
         let size = (SPRITE_EXTENT * SPRITE_SCALE) as u32;
         let mut px = tiny_skia::Pixmap::new(size, size).context("sprite")?;
         let base = tiny_skia::Transform::from_scale(SPRITE_SCALE, SPRITE_SCALE).pre_translate(-SPRITE_ORIGIN.0, -SPRITE_ORIGIN.1);
-        draw_cursor(&mut px, base);
+        draw_cursor(&mut px, base, style);
         mipmapped(device, queue, px.data(), size, size)
     }
 
@@ -578,9 +583,9 @@ impl Gpu {
             enc.setFragmentBytes_length_atIndex(NonNull::from(&u).cast::<c_void>(), size_of::<Uniforms>(), 0);
             enc.setFragmentTexture_atIndex(Some(src), 0);
             enc.setFragmentTexture_atIndex(Some(cam.unwrap_or(src)), 1);
-            enc.setFragmentTexture_atIndex(Some(&self.sprite), 2);
-            enc.setFragmentTexture_atIndex(Some(wall.map_or(&*self.sprite, |t| &**t)), 3);
-            enc.setFragmentTexture_atIndex(Some(label.map_or(&*self.sprite, |(_, t)| &**t)), 4);
+            enc.setFragmentTexture_atIndex(Some(&self.sprite[p.style.cursor_style.index()]), 2);
+            enc.setFragmentTexture_atIndex(Some(wall.map_or(&*self.sprite[0], |t| &**t)), 3);
+            enc.setFragmentTexture_atIndex(Some(label.map_or(&*self.sprite[0], |(_, t)| &**t)), 4);
             enc.setFragmentSamplerState_atIndex(Some(&self.linear), 0);
             enc.setFragmentSamplerState_atIndex(Some(&self.mip), 1);
             enc.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 3);
