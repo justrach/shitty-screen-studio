@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    agent::{self, Event, Proposal},
+    agent::{self, ConversationTurn, EditRequest, Event, Proposal},
     composer::Composer,
     icons::{self, icon},
 };
@@ -14,6 +14,23 @@ pub(super) struct Assistant {
     pub status: String,
     pub proposal: Option<Proposal>,
     pub baseline: Option<(Vec<ZoomSegment>, Timeline, Style)>,
+    pub sent_request: Option<String>,
+    pub applied_history: Vec<ConversationTurn>,
+}
+
+fn excerpt(text: &str, limit: usize) -> String {
+    let mut chars = text.chars();
+    let mut short: String = chars.by_ref().take(limit).collect();
+    if chars.next().is_some() {
+        short.push('…');
+    }
+    short
+}
+
+fn proposal_changes(p: &Proposal, zooms: &[ZoomSegment], timeline: &Timeline, style: Style) -> bool {
+    p.timeline.as_ref().is_some_and(|t| t != timeline)
+        || p.zooms.as_ref().is_some_and(|z| z.as_slice() != zooms)
+        || p.style.is_some_and(|s| s != style)
 }
 
 fn style_changes(before: Style, after: Style) -> Vec<String> {
@@ -69,20 +86,53 @@ impl Editor {
         }
         self.persist();
         self.player.pause();
-        let prompt = agent::prompt(
-            &request,
-            self.project.rec.duration,
-            &self.timeline,
-            &self.zooms,
-            self.style,
-        );
+        let playhead = self.player.position().clamp(0., self.timeline.duration());
+        let selected_clip = self.selected_slice.filter(|&i| i < self.timeline.slices.len());
+        let selected_zoom = self.selected.filter(|&i| i < self.zooms.len());
+        // Explicit allowlist: never serialize the Recording or Project here. They
+        // contain paths, cursor samples and recorded shortcuts, not edit context.
+        let context = serde_json::json!({
+            "recording": {
+                "width": self.project.rec.width,
+                "height": self.project.rec.height,
+                "fps": self.project.rec.fps,
+                "has_audio": self.project.audio().is_some(),
+                "has_camera": self.project.camera().is_some(),
+            },
+            "playhead": {
+                "edited_seconds": playhead,
+                "source_seconds": self.src(playhead),
+            },
+            "selected_clip": selected_clip.map(|i| serde_json::json!({
+                "index": i,
+                "source": self.timeline.slices[i],
+                "edited_bounds_seconds": self.timeline.bounds(i),
+            })),
+            "selected_zoom": selected_zoom.map(|i| serde_json::json!({
+                "index": i,
+                "segment": self.zooms[i],
+            })),
+            "pending_unapplied_proposal": self.assistant.proposal.as_ref(),
+            "previous_request": self.assistant.sent_request.as_deref(),
+        });
+        let edit_request = EditRequest {
+            instruction: request.clone(),
+            duration: self.project.rec.duration,
+            timeline: self.timeline.clone(),
+            zooms: self.zooms.clone(),
+            style: self.style,
+            context,
+            playhead,
+            selected_clip,
+            history: self.assistant.applied_history.clone(),
+        };
+        self.assistant.sent_request = Some(request);
         self.assistant.proposal = None;
         self.assistant.baseline = Some((self.zooms.clone(), self.timeline.clone(), self.style));
         self.assistant.status = "Connecting to Codegraff…".into();
         self.assistant.run = Some(agent::Run::start(
             self.project.dir.clone(),
-            prompt,
-            self.project.rec.duration,
+            edit_request,
             self.assistant
                 .understand_video
                 .then(|| self.project.video()),
@@ -107,8 +157,16 @@ impl Editor {
             self.assistant.run = None;
             match result {
                 Ok(p) => {
-                    self.assistant.status = p.summary.clone();
-                    self.assistant.proposal = Some(p);
+                    let (zooms, timeline, style) = self.assistant.baseline.as_ref()
+                        .map(|(z, t, s)| (z.as_slice(), t, *s))
+                        .unwrap_or((&self.zooms, &self.timeline, self.style));
+                    if proposal_changes(&p, zooms, timeline, style) {
+                        self.assistant.status = p.summary.clone();
+                        self.assistant.proposal = Some(p);
+                    } else {
+                        self.assistant.status = "No changes proposed: the result matches the edit this request started from. Nothing was applied. Try a more specific request.".into();
+                        self.assistant.proposal = None;
+                    }
                 }
                 Err(e) => self.assistant.status = format!("{e:#}"),
             }
@@ -136,6 +194,12 @@ impl Editor {
             cx.notify();
             return;
         }
+        if !proposal_changes(&p, &self.zooms, &self.timeline, self.style) {
+            self.assistant.status = "No changes to apply: the proposal matches your current edit.".into();
+            self.assistant.proposal = None;
+            cx.notify();
+            return;
+        }
         let before = (self.zooms.clone(), self.timeline.clone(), self.style);
         if let Some(t) = p.timeline {
             self.timeline = t;
@@ -158,6 +222,27 @@ impl Editor {
             self.project.rec.style = Some(self.style);
             self.assistant.status = format!("Could not save edit: {e}");
         } else {
+            // Remember only edits the user approved and that were saved. Keep
+            // this separate from the timeline's undo/redo history.
+            if let Some(request) = self.assistant.sent_request.as_ref() {
+                let mut changes = Vec::new();
+                if before.1 != self.timeline {
+                    changes.push(format!("Timeline: {} clips / {:.2}s → {} clips / {:.2}s",
+                        before.1.slices.len(), before.1.duration(),
+                        self.timeline.slices.len(), self.timeline.duration()));
+                }
+                if before.0 != self.zooms {
+                    changes.push(format!("Zooms: {} → {} segments", before.0.len(), self.zooms.len()));
+                }
+                changes.extend(style_changes(before.2, self.style));
+                self.assistant.applied_history.push(ConversationTurn {
+                    request: excerpt(request, 2000),
+                    result: excerpt(&format!("Applied: {}. Summary: {}", changes.join("; "), excerpt(&p.summary, 800)), 2000),
+                });
+                if self.assistant.applied_history.len() > 4 {
+                    self.assistant.applied_history.remove(0);
+                }
+            }
             self.history.push(before);
             if self.history.len() > 100 {
                 self.history.remove(0);
@@ -209,22 +294,66 @@ impl Editor {
                     }
                 })),
             );
+        let playhead = self.player.position().clamp(0., self.timeline.duration());
+        let target = self.selected_slice.filter(|&i| i < self.timeline.slices.len())
+            .map(|i| format!("Selected clip {}", i + 1))
+            .unwrap_or_else(|| "Clip at playhead".into());
+        body = body.child(small(format!(
+            "{target} · playhead {:.2}s edited / {:.2}s source",
+            playhead, self.src(playhead)
+        )));
+        if let Some(i) = self.selected.filter(|&i| i < self.zooms.len()) {
+            body = body.child(small(format!("Selected zoom {} · {:.2}–{:.2}s source",
+                i + 1, self.zooms[i].start, self.zooms[i].end)));
+        }
+        body = body.child(small(
+            "Requests can target the selected clip or playhead. Send a follow-up to refine a pending proposal; nothing applies automatically.",
+        ));
+        let mut memory = div().flex().flex_col().gap_2()
+            .child(section_title("Recent applied edits"))
+            .child(small("Session-local memory: last 4 approved, saved edits. Undo and manual edits may change the current state."));
+        if self.assistant.applied_history.is_empty() {
+            memory = memory.child(small("No applied edits remembered yet."));
+        } else {
+            for turn in &self.assistant.applied_history {
+                memory = memory.child(small(format!("{} → {}",
+                    excerpt(&turn.request, 100), excerpt(&turn.result.replace('\n', " "), 140))));
+            }
+        }
+        if !busy && (!self.assistant.applied_history.is_empty() || self.assistant.sent_request.is_some()) {
+            memory = memory.child(button("clear-agent-history", "Clear recent context")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if this.assistant.run.is_none() {
+                        this.assistant.applied_history.clear();
+                        // Keep only the request attached to a visible proposal,
+                        // so explicit refinement remains possible after clearing.
+                        if this.assistant.proposal.is_none() {
+                            this.assistant.sent_request = None;
+                        }
+                        cx.notify();
+                    }
+                })));
+        }
+        body = body.child(memory);
+        if self.assistant.proposal.is_some() {
+            body = body.child(small("Pending proposal is not applied. Your next message can refine it. Clearing recent context keeps this visible proposal."));
+        }
         if self.assistant.status.is_empty() {
             for (id, label, prompt) in [
                 (
-                    "agent-trim",
-                    "Trim the first second",
-                    "Cut the first second from this recording.",
+                    "agent-pace",
+                    "Tighten this clip's pacing",
+                    "Set the selected clip, or the clip at the playhead if none is selected, to 1.5× speed. Preserve all other clips and styling.",
                 ),
                 (
-                    "agent-portrait",
-                    "Make it portrait",
-                    "Set the canvas to vertical with a Midnight background and 60px padding.",
+                    "agent-focus",
+                    "Focus this moment",
+                    "If a zoom is selected, soften it to 1.5× without changing its timing. Otherwise add a gentle 1.5× zoom around the playhead, within the current clip, avoiding other zoom segments. Preserve other edits.",
                 ),
                 (
-                    "agent-zoom",
-                    "Give it a cleaner look",
-                    "Use Graphite, rounded corners, a subtle shadow, and smooth the cursor.",
+                    "agent-polish",
+                    "Polish the presentation",
+                    "Give this recording a clean presentation: Graphite background, 40px padding, rounded corners and a subtle shadow. If a camera track exists, show it as a small circular overlay at bottom right. Preserve the timeline and other settings.",
                 ),
             ] {
                 body = body.child(button(id, label).w_full().justify_start().on_click(
@@ -322,7 +451,11 @@ impl Editor {
                     ),
             );
         composer = composer.child(small(
-            "Video understanding sends up to 12 sampled frames to Gemini via Codegraff. MiMo receives observations and edit settings. Audio is not sent.",
+            if self.assistant.understand_video {
+                "Sends ≤12 targeted sampled frames to Gemini via Codegraff; no audio. MiMo receives visual observations, your request, current edit context and recent approved history. One validation-repair retry for malformed/invalid output; always review before applying."
+            } else {
+                "No frames or audio sent. MiMo receives your request, current edit context and recent approved history; no new visual analysis. One validation-repair retry for malformed/invalid output; always review before applying."
+            },
         ));
         frosted(
             16.,

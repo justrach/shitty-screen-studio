@@ -200,7 +200,7 @@ impl Editor {
         });
 
         Self {
-            assistant: Assistant { visible: false, understand_video: true, input, run: None, status: String::new(), proposal: None, baseline: None },
+            assistant: Assistant { visible: false, understand_video: true, input, run: None, status: String::new(), proposal: None, baseline: None, sent_request: None, applied_history: Vec::new() },
             project,
             style,
             zooms,

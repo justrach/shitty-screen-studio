@@ -1,0 +1,4 @@
+Engine: Codex imagegen
+Asset: studio-light.png
+
+Use case: stylized-concept. Asset type: decorative illustration for a professional dark macOS video recorder application, viewed in a small wide card. Create a premium cinematic macro still life of three translucent glass film frames hovering above a charcoal-black surface, a thin violet illuminated timeline ribbon weaving beneath them. Frames show abstract softly lit geometric scenery only, no people or photographs. Restrained lavender edge lighting with a tiny warm amber glint, rich black negative space, subtle realistic optical glass texture, precise minimal composition, grounded shadows. Center the subject with generous clean dark margins so a wide crop works. No typography, letters, numbers, UI labels, logos, watermarks, gradients used as full background, neon overload or decorative clutter. This is an original understated editorial 3D illustration, not an app screenshot.

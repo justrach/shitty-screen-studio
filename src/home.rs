@@ -12,130 +12,44 @@ impl Studio {
                         .child(section_title("Capture")))
                     .child(div().flex().items_center().gap_2().px_3().py_1().rounded_full().bg(alpha(SUCCESS, 0.06))
                         .child(div().size(px(5.)).rounded_full().bg(rgb(if self.screen_access || self.tab == Tab::Event { SUCCESS } else { ACCENT })))
-                        .child(small(if self.screen_access || self.tab == Tab::Event { "Ready to record" } else { "Screen access needed" }))))
-                .child(div().id("home").flex_1().min_h_0().overflow_y_scroll().p_6()
-                    .child(div().w_full().max_w(px(920.)).mx_auto().flex().flex_col().gap_6()
-                        .child(div().flex().flex_col().gap_3().pt_4().pb_2()
-                            .child(div().flex().items_center().gap_2()
-                                .child(div().size(px(6.)).rounded_full().bg(rgb(ACCENT)))
-                                .child(small("YOUR NEXT GREAT TAKE").text_color(rgb(ACCENT)).font_weight(FontWeight::SEMIBOLD)))
-                            .child(div().text_size(px(34.)).font_weight(FontWeight::SEMIBOLD).child("A little capture. A lot of possibility."))
-                            .child(div().text_size(px(14.)).text_color(rgb(MUTED)).child("Capture your screen or record yourself at an event. Shape your story and share it.")))
-                        .child(div().flex().gap_4()
-                            .child(frosted(16., MENU_BLUR, self.render_new_recording(cx)))
-                            .child(frosted(16., MENU_BLUR, self.render_editing_intro(cx)))))))
+                        .child(small(if self.tab == Tab::Event { "Event capture" } else if self.screen_access { "Screen access granted" } else { "Screen access needed" }))))
+                .child(div().id("home").flex_1().min_h_0().overflow_y_scroll().p_5()
+                    .child(div().w_full().max_w(px(1040.)).mx_auto().flex().flex_col().gap_4()
+                        .child(div().flex().items_center().gap_4().pt_2().pb_2()
+                            .child(div().flex_1().min_w_0().flex().flex_col().gap_2()
+                                .child(div().flex().items_center().gap_2()
+                                    .child(div().size(px(6.)).rounded_full().bg(rgb(ACCENT)))
+                                    .child(small("CAPTURE STUDIO").text_color(rgb(ACCENT)).font_weight(FontWeight::SEMIBOLD)))
+                                .child(div().text_size(px(28.)).font_weight(FontWeight::SEMIBOLD).child("Ready when you are."))
+                                .child(div().text_size(px(14.)).text_color(rgb(MUTED)).child("Choose your source, check your framing and sound, then make your next take.")))
+                            .child(div().w(px(160.)).h(px(104.)).flex_none().rounded(px(12.)).overflow_hidden()
+                                .child(gpui::img(icons::STUDIO_LIGHT).size_full().object_fit(gpui::ObjectFit::Cover))))
+                        .child(div().flex().items_start().gap_4()
+                            .child(div().flex_1().min_w_0()
+                                .child(frosted(16., MENU_BLUR, self.render_new_recording(cx))))
+                            .child(div().w(px(320.)).flex_none()
+                                .child(frosted(16., MENU_BLUR, self.render_preflight(cx)))))
+                        .child(frosted(16., MENU_BLUR, self.render_editing_intro(cx))))))
             ).into_any_element()
     }
 
     fn render_editing_intro(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .w(px(288.))
-            .flex_none()
-            .flex()
-            .flex_col()
-            .gap_4()
-            .child(
-                glass_card()
-                    .p_5()
-                    .flex()
-                    .flex_col()
-                    .gap_4()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(icon(icons::MAGIC).size(px(18.)).text_color(rgb(ACCENT)))
-                            .child(section_title("From take to final cut")),
-                    )
-                    .child(
-                        div()
-                            .h(px(142.))
-                            .p_4()
-                            .rounded(px(10.))
-                            .bg(gpui::linear_gradient(
-                                135.,
-                                gpui::linear_color_stop(alpha(ACCENT, 0.22), 0.),
-                                gpui::linear_color_stop(alpha(PURPLE, 0.05), 1.),
-                            ))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                div()
-                                    .w_full()
-                                    .h(px(110.))
-                                    .p_3()
-                                    .rounded(px(8.))
-                                    .bg(alpha(0xffffff, 0.065))
-                                    .border_1()
-                                    .border_color(alpha(ACCENT, 0.25))
-                                    .flex()
-                                    .flex_col()
-                                    .gap_2()
-                                    .child(div().flex().gap_1().children(
-                                        [0..3].into_iter().flatten().map(|_| {
-                                            div().size(px(4.)).rounded_full().bg(rgb(MUTED))
-                                        }),
-                                    ))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .child(
-                                                icon(icons::MONITOR)
-                                                    .size(px(32.))
-                                                    .text_color(rgb(ACCENT)),
-                                            ),
-                                    )
-                                    .child(div().flex().gap_1().h(px(8.))
-                                        .child(div().flex_1().rounded(px(3.)).bg(alpha(ACCENT, 0.7)))
-                                        .child(div().w(px(38.)).rounded(px(3.)).bg(alpha(PURPLE, 0.55)))
-                                        .child(div().w(px(24.)).rounded(px(3.)).bg(alpha(ACCENT, 0.35)))),
-                            ),
-                    )
-                    .children(
-                        [
-                            (icons::CLOCK, "Trim, split, and change speed"),
-                            (icons::MAGIC, "Automatic zooms and smooth cursors"),
-                            (icons::PHONE, "Landscape, portrait, or square"),
-                            (icons::GRAFF, "Refine your edit with Codegraff"),
-                        ]
-                        .map(|(i, label)| {
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_3()
-                                .child(icon(i).size(px(16.)).text_color(rgb(MUTED)))
-                                .child(small(label).text_color(rgb(TEXT)))
-                        }),
-                    )
-                    .child(
-                        button("try-editor", "Explore the editor")
-                            .w_full()
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.open_demo(window, cx)),
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .px_2()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(
-                        small("Recorder")
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(TEXT)),
-                    )
-                    .child(small(
-                        "Built on Shitty Screen Studio by Li Yang (@hewliyang).",
-                    ))
-                    .child(small("Harness UI · Codegraff editing")),
-            )
+        div().w_full().flex().flex_col().gap_2()
+            .child(glass_card().w_full().p_4().flex().items_center().gap_5()
+                .child(div().flex_1().min_w_0().flex().flex_col().gap_2()
+                    .child(small("AFTER THE TAKE").text_size(px(10.)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(ACCENT)))
+                    .child(div().text_size(px(18.)).font_weight(FontWeight::SEMIBOLD).child("Make the take yours."))
+                    .child(small("Trim the pauses. Find the right frame. Add the finishing touches."))
+                    .child(div().flex().flex_wrap().gap_3().children([
+                        (icons::CLOCK, "Precise cuts"),
+                        (icons::MAGIC, "Smooth zooms"),
+                        (icons::GRAFF, "Codegraff edits"),
+                    ].map(|(i, label)| div().flex().items_center().gap_1()
+                        .child(icon(i).size(px(13.)).text_color(rgb(ACCENT)))
+                        .child(small(label).text_size(px(10.))))))
+                    .child(div().pt_1().child(button("try-editor", "Explore the editor →")
+                        .on_click(cx.listener(|this, _, window, cx| this.open_demo(window, cx)))))))
+            .child(small("Built on Shitty Screen Studio by Li Yang (@hewliyang) · Harness UI · Codegraff editing").px_2().text_size(px(10.)))
             .into_any_element()
     }
 
@@ -281,7 +195,8 @@ impl Studio {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(div().text_size(px(18.)).font_weight(FontWeight::BOLD).child("New recording"))
+                    .child(small("01  /  SET UP YOUR TAKE").text_size(px(10.)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(ACCENT)))
+                    .child(div().text_size(px(18.)).font_weight(FontWeight::SEMIBOLD).child("New recording"))
                     .child(
                         div()
                             .text_size(px(BODY))
@@ -291,14 +206,14 @@ impl Studio {
             )
             .child(segments()
                 .child(segment("mode-screen", "Screen", self.tab != Tab::Event).flex_1()
-                    .on_click(cx.listener(|this, _, _, cx| { this.tab = Tab::Display; cx.notify(); })))
+                    .on_click(cx.listener(|this, _, _, cx| { this.tab = Tab::Display; this.refresh_monitoring(cx); })))
                 .child(segment("mode-event", "Event · Self recorder", self.tab == Tab::Event).flex_1()
                     .on_click(cx.listener(|this, _, _, cx| {
                         if this.tab != Tab::Event { this.options.mic = true; }
                         this.tab = Tab::Event;
                         this.cameras = crate::camera::list_devices(false);
                         this.microphones = crate::camera::list_devices(true);
-                        cx.notify();
+                        this.refresh_monitoring(cx);
                     }))))
             .child(self.render_source(cx))
             .child(self.render_inputs(cx))
@@ -340,7 +255,7 @@ impl Studio {
                             .text_color(rgb(0x14121f))
                             .font_weight(FontWeight::SEMIBOLD)
                             .cursor_default()
-                            .child(icon(icons::MONITOR).size(px(16.)).text_color(rgb(0x14121f)))
+                            .child(div().size(px(8.)).rounded_full().bg(rgb(0x14121f)))
                             .child("Start recording")
                             .when(can_record, |d| d.hover(|s| s.bg(rgb(ACCENT_HOVER))))
                             .when(!can_record, |d| d.opacity(0.4))
@@ -565,7 +480,7 @@ impl Studio {
                 .child(switch(on))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     f(&mut this.options);
-                    cx.notify();
+                    this.refresh_monitoring(cx);
                 }))
         };
         div()
@@ -586,12 +501,12 @@ impl Studio {
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.cameras = crate::camera::list_devices(false);
                     this.microphones = crate::camera::list_devices(true);
-                    cx.notify();
+                    this.refresh_monitoring(cx);
                 })))
             .child(small(if self.tab == Tab::Event {
-                "macOS asks for camera and microphone access when you start. Refresh inputs after connecting a device. Turn off Microphone for a silent take."
+                "Use Check inputs to allow access and test your framing and sound before recording. Turn off Microphone for a silent take."
             } else {
-                "macOS asks for camera and microphone access when you start. Keyboard Shortcuts uses Input Monitoring; plain typing is not saved."
+                "Use Check inputs to test enabled devices before recording. Keyboard Shortcuts uses Input Monitoring; plain typing is not saved."
             }))
             .into_any_element()
     }
@@ -607,7 +522,7 @@ impl Studio {
                     .child("System default").child(check(selected.is_none()))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if mic { this.options.mic_device = None; } else { this.options.camera_device = None; }
-                        cx.notify();
+                        this.refresh_monitoring(cx);
                     })))
                 .children(devices.iter().enumerate().map(|(i, device)| {
                     let id = device.id.clone();
@@ -616,10 +531,10 @@ impl Studio {
                         .child(check(selected.as_deref() == Some(device.id.as_str())))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if mic { this.options.mic_device = Some(id.clone()); } else { this.options.camera_device = Some(id.clone()); }
-                            cx.notify();
+                            this.refresh_monitoring(cx);
                         }))
                 }))
-                .when(devices.is_empty(), |d| d.child(group_row(false).child(small("No devices listed. Allow access when starting, then refresh inputs.")))))
+                .when(devices.is_empty(), |d| d.child(group_row(false).child(small("No devices listed. Use Check inputs to allow access, then refresh inputs.")))))
             .when(selected.as_ref().is_some_and(|id| !devices.iter().any(|d| &d.id == id)), |d| {
                 d.child(small("Selected device is disconnected. Choose a connected input or System default.").text_color(rgb(RED)))
             })

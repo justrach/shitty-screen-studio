@@ -2,6 +2,8 @@
 use gpui::{AssetSource, SharedString, Styled as _, Svg, svg};
 use std::borrow::Cow;
 
+pub const STUDIO_LIGHT: &str = "artwork/studio-light.png";
+
 macro_rules! assets {
     ($($name:ident => $file:literal),* $(,)?) => {
         $(pub const $name: &str = concat!("icons/", $file, ".svg");)*
@@ -9,12 +11,13 @@ macro_rules! assets {
         impl AssetSource for Assets {
             fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
                 Ok(match path {
+                    STUDIO_LIGHT => Some(Cow::Borrowed(include_bytes!("../assets/studio-light.png").as_slice())),
                     $(concat!("icons/", $file, ".svg") => Some(Cow::Borrowed(include_bytes!(concat!("../vendor/harness/icons/", $file, ".svg")).as_slice())),)*
                     _ => None,
                 })
             }
             fn list(&self, path: &str) -> anyhow::Result<Vec<SharedString>> {
-                Ok([$($name),*].into_iter().filter(|p| p.starts_with(path)).map(SharedString::from).collect())
+                Ok([$($name),*, STUDIO_LIGHT].into_iter().filter(|p| p.starts_with(path)).map(SharedString::from).collect())
             }
         }
     };

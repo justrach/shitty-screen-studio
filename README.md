@@ -44,7 +44,7 @@ tccutil reset ScreenCapture recorder.codegraff.app.dev
 open -n "$HOME/Applications/Recorder.app" --args --request-screen-access
 ```
 
-Microphone, Camera, and Keyboard Shortcuts are optional and off by default. Checks run when you click **Start Recording**, before the window hides. Declined-access messages explain how to enable access or record without that input. Keyboard Shortcuts uses Input Monitoring and may require restarting.
+Microphone, Camera, and Keyboard Shortcuts are optional and off by default. **Check inputs** requests camera/microphone access for a live preflight check; **Start Recording** also checks enabled inputs before the window hides. Declined-access messages explain how to enable access or record without that input. Keyboard Shortcuts uses Input Monitoring and may require restarting.
 
 Existing recordings remain in the original `Movies/Shitty Screen Studio` library so renaming the app preserves them. The recording library and demo open without requesting screen access.
 
@@ -52,9 +52,13 @@ Existing recordings remain in the original `Movies/Shitty Screen Studio` library
 
 Open a recording and click **Codegraff** in the editor toolbar. Describe an edit or select a starter prompt, then **Send**. The embedded `graff acp` processes explicitly select Gemini 3.8 Flash (`codegraff/gemini-3.8-flash`) for visual understanding and MiMo 2.6 Pro (`codegraff/mimo-v2.6-pro`) for edits, using your existing graff credentials. If needed, complete `graff login` or sign in through Harness first.
 
-Supported edits include trimming and splitting by time, changing clip speed, adjusting zoom segments, changing backgrounds and aspect ratio, and styling the cursor or camera overlay. Review **Proposed changes**, then click **Apply edits** to update the timeline and preview. **Undo assistant edit** restores the previous timeline and style; making a subsequent timeline edit clears that separate undo control.
+Supported edits include trimming and splitting by time, clip speed, zoom segments, backgrounds and aspect ratio, and cursor/camera styling. Starter prompts target clip pacing, the current zoom/playhead, and presentation polish. Requests include the selected clip/zoom, edited and source playhead times, recording dimensions/fps, track-presence flags, and current edit settings. Send a follow-up to refine a pending, unapplied proposal rather than starting from scratch.
 
-With **Video understanding: On**, Recorder sends up to 12 evenly spaced, timestamped JPEG frames (maximum 960×540) to Gemini through Codegraff. This is sampled visual understanding, not full-video or audio analysis. MiMo receives the request, current edit settings, and Gemini’s observations. With understanding off, MiMo receives only the request and edit settings. Recorder does not send audio, recorded keys, or cursor samples. The agent produces a validated JSON proposal with local tools disabled; it cannot directly write recording files through this integration. Cancel stops its process. If you change the timeline while a proposal is being prepared, Recorder asks you to send again against the latest edit.
+The panel remembers the last **4 approved, successfully saved edits** (bounded request/result excerpts), only in memory for the current editor session. Cancelled, failed, and unapplied proposals do not enter this history. **Clear recent context** clears it when idle; a visible pending proposal and its request remain available for refinement. Current settings remain authoritative after undo or manual edits.
+
+With **Video understanding: On**, Recorder sends **at most 12 targeted, timestamped sampled frames** to Gemini through Codegraff, prioritizing the selected clip and playhead with broader coverage. This is sampled visual understanding, not full-video or audio analysis. MiMo receives visual observations plus your request, current edit context, recent approved history, and any pending proposal being refined. With understanding off, no new frames or audio are sent; MiMo still receives the edit context/history. Context excludes recording paths, raw recorded keypress/cursor data, and login data. Sampled frames can contain anything visible in the recording.
+
+The agent proposes validated JSON with local tools disabled, with **one validation-repair retry only for malformed or invalid output**. Validation checks structure and bounds, not whether a visual interpretation is correct; review scene-based edits carefully. It cannot directly write recording files through this integration. Review **Proposed changes**, then explicitly **Apply edits to timeline**; nothing applies automatically. No-op proposals are surfaced without applying or recording a successful edit. **Undo** / **⌘Z** restores the previous edit. Cancel stops the running request. If the timeline or style changed since a request was sent, applying is blocked until you send again against the latest edit.
 
 [Diffusion Studio](https://github.com/diffusionstudio/editor) informed the workflow of reviewing agent edits in the same editor as manual edits. Recorder currently supports the timeline and styling operations above. It does not yet offer transcription, subtitles, or generative assets.
 
@@ -64,6 +68,7 @@ With **Video understanding: On**, Recorder sends up to 12 evenly spaced, timesta
 - Harness theme and UI patterns: Standard Harness Pte. Ltd., Rach Pradhan, and Yu Xi Lim. Provenance and license: `vendor/harness/`.
 - Solar Icons by 480 Design, [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
 - Codegraff: Rach Pradhan and Yu Xi Lim. Bundled license: `vendor/codegraff/LICENSE`.
+- Capture-screen artwork: generated with Codex imagegen; source brief in `assets/studio-light.prompt.txt`.
 
 ## Validation
 
@@ -93,5 +98,16 @@ Recorder’s Agents page adapts the Harness account-card layout and uses graff�
 Choose **Event · Self recorder** on the capture screen to record a full-frame webcam take for talks, interviews, and personal updates. Select a named **Webcam** and **Microphone device**, or use **System default**. Microphone starts enabled in Event mode and can be turned off for a silent take. Use **Refresh cameras & microphones** after connecting an external device; disconnected selections fail clearly instead of switching devices silently.
 
 Event mode requires camera access and microphone access when enabled; it does not require Screen Recording or Input Monitoring. Stop with the floating bar, menu bar, or the usual stop shortcut. The take opens in the editor and is saved in the same library, with a clean edge-to-edge canvas. Screen mode also supports the same device selectors for its webcam overlay and microphone.
+
+### Live input check
+
+The **Before you roll** panel previews the selected webcam and meters the selected microphone in either capture mode. Enable the inputs you want, then click **Check inputs**. Monitoring is explicit: opening Recorder does not activate devices or ask for camera/microphone access.
+
+- Live webcam preview with actual dimensions, measured preview frame rate, optional rule-of-thirds guides, and preview-only mirroring. Guides and mirroring do not alter recordings.
+- Native AVFoundation audio metering on a −60 to 0 dBFS scale: average level, white peak-hold marker, maximum peak with reset, and a two-second near-clipping warning at −1 dBFS. The meter shows the loudest channel; it measures digital signal level, not room loudness. Adjust the microphone's input level in macOS or on the device.
+- Changing enabled inputs or selected devices restarts the check. Missing/stale signals and permission failures show actionable messages; disconnected selections never silently fall back.
+- **Stop input check**, opening the editor/Agents, and starting recording release the monitoring session. Recording waits for hardware release before opening its own session.
+
+Preview uses Apple's AVFoundation capture APIs and CoreVideo/Metal surfaces. The input check creates no files, sends no media, and does not play microphone audio through speakers.
 
 CLI: `recorder --devices` lists device IDs; `recorder --record 10 --event --mic --camera-device <id> --mic-device <id>` records an event take. Omit the device flags to use system defaults.

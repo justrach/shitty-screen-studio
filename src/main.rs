@@ -1,6 +1,7 @@
 mod app;
 mod audio;
 mod camera;
+mod monitor;
 mod capture;
 mod compositor;
 mod demo;

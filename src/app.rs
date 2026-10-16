@@ -2,6 +2,8 @@
 mod accounts;
 #[path = "home.rs"]
 mod home;
+#[path = "preflight.rs"]
+mod preflight;
 use crate::capture::{self, RecState, RecordOptions, RecordingHandle, Source, Sources};
 use crate::editor::Editor;
 use crate::project::{self, Project};
@@ -69,6 +71,11 @@ pub struct Studio {
     tab: Tab,
     cameras: Vec<crate::camera::DeviceInfo>,
     microphones: Vec<crate::camera::DeviceInfo>,
+    monitor: Option<crate::monitor::Monitor>,
+    monitoring: bool,
+    mirror_preview: bool,
+    framing_guides: bool,
+    _monitor_tick: Option<Task<()>>,
     display: Option<u32>,
     window: Option<u32>,
     area: Option<Source>,
@@ -96,6 +103,11 @@ impl Studio {
             tab: Tab::Display,
             cameras: crate::camera::list_devices(false),
             microphones: crate::camera::list_devices(true),
+            monitor: None,
+            monitoring: false,
+            mirror_preview: false,
+            framing_guides: true,
+            _monitor_tick: None,
             display: None,
             window: None,
             area: None,
@@ -249,6 +261,7 @@ impl Studio {
     }
 
     fn open_project(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.stop_monitoring();
         self.permission_error = false;
         match Project::load(&dir) {
             Ok(project) => {
@@ -263,6 +276,7 @@ impl Studio {
     }
 
     fn open_demo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.stop_monitoring();
         self.permission_error = false;
         let dir = project::library_dir().join("demo");
         self.screen = Screen::Busy("Building demo recording…".into());
@@ -281,8 +295,51 @@ impl Studio {
     }
 
     fn open_agents(&mut self, cx: &mut Context<Self>) {
+        self.stop_monitoring();
         let studio = cx.entity().downgrade();
         self.screen = Screen::Agents(cx.new(|cx| accounts::Agents::new(studio, cx)));
+        cx.notify();
+    }
+
+    fn stop_monitoring(&mut self) {
+        self.monitoring = false;
+        self._monitor_tick = None;
+        if let Some(monitor) = &mut self.monitor { let _ = monitor.stop(); }
+    }
+
+    fn refresh_monitoring(&mut self, cx: &mut Context<Self>) {
+        if self.monitoring {
+            let config = crate::monitor::Config {
+                camera: self.tab == Tab::Event || self.options.camera,
+                mic: self.options.mic,
+                camera_device: self.options.camera_device.clone(),
+                mic_device: self.options.mic_device.clone(),
+                mirror: self.mirror_preview,
+            };
+            if !config.camera && !config.mic {
+                self.stop_monitoring();
+            } else {
+                self.monitor.get_or_insert_with(crate::monitor::Monitor::new).configure(config);
+            }
+        }
+        cx.notify();
+    }
+
+    fn toggle_monitoring(&mut self, cx: &mut Context<Self>) {
+        if self.monitoring {
+            self.stop_monitoring();
+        } else {
+            self.monitoring = true;
+            self.refresh_monitoring(cx);
+            if self.monitoring {
+                self._monitor_tick = Some(cx.spawn(async move |this, cx| {
+                    loop {
+                        cx.background_executor().timer(Duration::from_millis(33)).await;
+                        if this.update(cx, |_, cx| cx.notify()).is_err() { break; }
+                    }
+                }));
+            }
+        }
         cx.notify();
     }
 
@@ -292,11 +349,20 @@ impl Studio {
         }
         let mut options = self.options.clone();
         options.source = self.source().unwrap();
+        self.monitoring = false;
+        self._monitor_tick = None;
+        let paused = self.monitor.as_mut().map(|monitor| monitor.stop());
         self.screen = Screen::Busy("Checking recording permissions… Respond to any macOS dialog to continue.".into());
         self.error = None;
         self.permission_error = false;
         cx.notify();
-        let task = cx.background_executor().spawn(async move { capture::ensure_recording_access(options) });
+        let task = cx.background_executor().spawn(async move {
+            if let Some(paused) = paused {
+                paused.recv_timeout(Duration::from_secs(130))
+                    .map_err(|_| anyhow::anyhow!("Input check is still waiting for macOS. Respond to the permission dialog, then try recording again."))?;
+            }
+            capture::ensure_recording_access(options)
+        });
         self._permission_task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             let _ = this.update_in(cx, |this, window, cx| match result {
